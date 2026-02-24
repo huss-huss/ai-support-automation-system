@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Support Automation · Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Outfit', 'system-ui', 'sans-serif'],
+            display: ['Outfit', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            brand: { 50: '#f0f9ff', 100: '#e0f2fe', 200: '#bae6fd', 300: '#7dd3fc', 400: '#38bdf8', 500: '#0ea5e9', 600: '#0284c7', 700: '#0369a1', 800: '#075985', 900: '#0c4a6e' },
+            surface: { 50: '#fafafa', 100: '#f4f4f5', 200: '#e4e4e7', 300: '#d4d4d8', 400: '#a1a1aa', 500: '#71717a', 600: '#52525b', 700: '#3f3f46', 800: '#27272a', 900: '#18181b' },
+          },
+          boxShadow: {
+            'soft': '0 2px 15px -3px rgba(0,0,0,0.04), 0 10px 20px -2px rgba(0,0,0,0.03)',
+            'soft-lg': '0 10px 40px -10px rgba(0,0,0,0.08), 0 2px 10px -2px rgba(0,0,0,0.02)',
+            'glow': '0 0 0 1px rgba(14,165,233,0.1), 0 10px 40px -10px rgba(14,165,233,0.15)',
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.35s ease-out',
+            'slide-up': 'slideUp 0.4s ease-out',
+          },
+          keyframes: {
+            fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+            slideUp: { '0%': { opacity: '0', transform: 'translateY(12px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Outfit', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    .card { background: rgba(255,255,255,0.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.6); box-shadow: 0 2px 15px -3px rgba(0,0,0,0.04), 0 10px 20px -2px rgba(0,0,0,0.03); }
+    .card:hover { box-shadow: 0 10px 40px -10px rgba(0,0,0,0.08); }
+    .btn-primary { background: linear-gradient(180deg, #0ea5e9 0%, #0284c7 100%); color: white; font-weight: 500; transition: transform 0.15s ease, box-shadow 0.15s ease; }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 25px -5px rgba(14,165,233,0.35); }
+    .btn-primary:active { transform: translateY(0); }
+    .input-focus:focus { outline: none; box-shadow: 0 0 0 3px rgba(14,165,233,0.2); border-color: #0ea5e9; }
+    .ticket-row { transition: background 0.2s ease, transform 0.15s ease; }
+    .ticket-row:hover { background: rgba(248,250,252,0.9); transform: translateX(4px); }
+    .badge { font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; }
+    .badge-low { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); color: #065f46; }
+    .badge-medium { background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); color: #92400e; }
+    .badge-high { background: linear-gradient(135deg, #fed7aa 0%, #fdba74 100%); color: #9a3412; }
+    .badge-urgent { background: linear-gradient(135deg, #fecaca 0%, #fca5a5 100%); color: #991b1b; }
+    #ticket-detail { transition: opacity 0.3s ease, transform 0.3s ease; }
+    .detail-enter { animation: detailEnter 0.35s ease-out forwards; }
+    @keyframes detailEnter { from { opacity: 0; transform: translateY(16px) scale(0.98) } to { opacity: 1; transform: translateY(0) scale(1) } }
+    .toast { animation: toastIn 0.3s ease-out; }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(-10px) } to { opacity: 1; transform: translateY(0) } }
+  </style>
+</head>
+<body class="min-h-screen bg-[#f8fafc] text-surface-800">
+  <div id="app" class="min-h-screen">
+    <!-- Header -->
+    <header class="sticky top-0 z-30 border-b border-surface-200/80 bg-white/80 backdrop-blur-xl">
+      <div class="max-w-6xl mx-auto px-6 py-5 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-soft">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+          </div>
+          <div>
+            <h1 class="text-xl font-semibold tracking-tight text-surface-900">Support Automation</h1>
+            <p class="text-sm text-surface-500 font-medium">Triage · Route · Draft</p>
+          </div>
+        </div>
+        <a href="/docs" target="_blank" class="text-sm font-medium text-surface-500 hover:text-brand-600 transition-colors">API docs</a>
+      </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-6 py-10">
+      <!-- New ticket card -->
+      <section class="card rounded-2xl p-8 mb-10 animate-fade-in">
+        <div class="flex items-center gap-3 mb-6">
+          <span class="flex w-9 h-9 items-center justify-center rounded-lg bg-brand-50 text-brand-600">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+          </span>
+          <h2 class="text-lg font-semibold text-surface-900">New ticket</h2>
+        </div>
+        <form id="create-form" class="grid gap-5 sm:grid-cols-2">
+          <div class="sm:col-span-2">
+            <label class="block text-sm font-medium text-surface-600 mb-2">Subject</label>
+            <input type="text" name="subject" required
+              class="input-focus w-full rounded-xl border border-surface-200 bg-white/80 px-4 py-3 text-surface-800 placeholder-surface-400 transition-all duration-200"
+              placeholder="e.g. Payment failed, login issue…" />
+          </div>
+          <div class="sm:col-span-2">
+            <label class="block text-sm font-medium text-surface-600 mb-2">Message</label>
+            <textarea name="body" rows="4" required
+              class="input-focus w-full rounded-xl border border-surface-200 bg-white/80 px-4 py-3 text-surface-800 placeholder-surface-400 transition-all duration-200 resize-none"
+              placeholder="Paste or type the customer message…"></textarea>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-surface-600 mb-2">Customer ID</label>
+            <input type="text" name="customer_id"
+              class="input-focus w-full rounded-xl border border-surface-200 bg-white/80 px-4 py-3 text-surface-800 placeholder-surface-400 transition-all duration-200"
+              placeholder="Optional" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-surface-600 mb-2">Channel</label>
+            <select name="channel"
+              class="input-focus w-full rounded-xl border border-surface-200 bg-white/80 px-4 py-3 text-surface-800 transition-all duration-200">
+              <option value="">Select channel</option>
+              <option value="email">Email</option>
+              <option value="chat">Chat</option>
+              <option value="web">Web</option>
+            </select>
+          </div>
+          <div class="sm:col-span-2 flex justify-end pt-1">
+            <button type="submit" id="submit-btn"
+              class="btn-primary px-6 py-3 rounded-xl text-sm">
+              Create ticket
+            </button>
+          </div>
+        </form>
+        <div id="create-message" class="mt-4 text-sm hidden rounded-xl px-4 py-2.5"></div>
+      </section>
+
+      <!-- Ticket list -->
+      <section class="card rounded-2xl p-8 animate-slide-up">
+        <div class="flex items-center justify-between mb-6">
+          <div class="flex items-center gap-3">
+            <span class="flex w-9 h-9 items-center justify-center rounded-lg bg-surface-100 text-surface-600">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
+            </span>
+            <h2 class="text-lg font-semibold text-surface-900">Tickets</h2>
+          </div>
+          <button type="button" id="refresh-list" class="text-sm font-medium text-brand-600 hover:text-brand-700 transition-colors flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+            Refresh
+          </button>
+        </div>
+        <div id="ticket-list" class="space-y-1">
+          <p class="text-surface-500 py-8 text-center">Loading…</p>
+        </div>
+      </section>
+
+      <!-- Ticket detail (slide-in panel) -->
+      <section id="ticket-detail" class="hidden fixed inset-y-0 right-0 w-full max-w-2xl bg-gradient-to-b from-white to-surface-50/50 border-l border-surface-200 shadow-2xl z-40 overflow-y-auto">
+        <div class="sticky top-0 z-10 bg-white/90 backdrop-blur-md border-b border-surface-200/80 px-6 py-4 flex items-center justify-between">
+          <h2 class="text-lg font-semibold text-surface-900">Ticket detail</h2>
+          <div class="flex items-center gap-1">
+            <button type="button" id="refresh-detail-btn" class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-brand-600 bg-brand-50 hover:bg-brand-100 transition-colors">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+              Refresh
+            </button>
+            <button type="button" id="close-detail" class="p-2 rounded-lg text-surface-500 hover:text-surface-800 hover:bg-surface-100 transition-colors">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+        </div>
+        <div class="p-6 detail-enter space-y-6" id="ticket-detail-body"></div>
+        <div class="p-6 pt-0">
+          <div class="rounded-2xl border border-surface-200/80 bg-white/80 p-5">
+            <h3 class="text-sm font-semibold text-surface-800 mb-3 flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-brand-500"></span>
+              Audit log
+            </h3>
+            <div id="audit-log" class="space-y-2 text-sm"></div>
+          </div>
+        </div>
+      </section>
+      <div id="detail-backdrop" class="hidden fixed inset-0 bg-surface-900/20 backdrop-blur-sm z-30" aria-hidden="true"></div>
+    </main>
+  </div>
+
+  <script>
+    const API = window.location.origin;
+
+    function showMessage(el, text, isError = false) {
+      const node = document.getElementById(el);
+      node.textContent = text;
+      node.className = 'mt-4 text-sm rounded-xl px-4 py-2.5 ' + (isError ? 'bg-red-50 text-red-700' : 'bg-brand-50 text-brand-800');
+      node.classList.remove('hidden');
+      node.classList.add('toast');
+    }
+
+    function priorityBadge(p) {
+      if (!p) return '';
+      const c = { low: 'badge-low', medium: 'badge-medium', high: 'badge-high', urgent: 'badge-urgent' }[p] || 'badge-low';
+      return `<span class="badge ${c} px-2.5 py-1 rounded-lg">${p}</span>`;
+    }
+
+    function formatDate(s) {
+      if (!s) return '—';
+      const d = new Date(s);
+      return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    }
+
+    document.getElementById('create-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('submit-btn');
+      const fd = new FormData(e.target);
+      btn.disabled = true;
+      try {
+        const r = await fetch(API + '/tickets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subject: fd.get('subject'),
+            body: fd.get('body'),
+            customer_id: fd.get('customer_id') || null,
+            channel: fd.get('channel') || null,
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) {
+          showMessage('create-message', 'Ticket created. The worker will process it (triage → routing → draft). Open the ticket and click Refresh to see updates.');
+          e.target.reset();
+          loadTickets();
+          setTimeout(() => { openDetail(); loadTicketDetail(data.id); }, 400);
+        } else {
+          showMessage('create-message', data.detail?.message || (typeof data.detail === 'string' ? data.detail : 'Failed to create ticket'), true);
+        }
+      } catch (err) {
+        showMessage('create-message', 'Network error: ' + err.message, true);
+      }
+      btn.disabled = false;
+    });
+
+    let currentDetailId = null;
+
+    function openDetail() {
+      document.getElementById('ticket-detail').classList.remove('hidden');
+      document.getElementById('detail-backdrop').classList.remove('hidden');
+      document.getElementById('ticket-detail').classList.add('detail-enter');
+    }
+    function closeDetail() {
+      document.getElementById('ticket-detail').classList.add('hidden');
+      document.getElementById('detail-backdrop').classList.add('hidden');
+    }
+
+    document.getElementById('close-detail').addEventListener('click', closeDetail);
+    document.getElementById('detail-backdrop').addEventListener('click', closeDetail);
+    document.getElementById('refresh-detail-btn').addEventListener('click', () => {
+      if (currentDetailId) { loadTicketDetail(currentDetailId); loadTickets(); }
+    });
+
+    async function loadTickets() {
+      const list = document.getElementById('ticket-list');
+      try {
+        const r = await fetch(API + '/tickets');
+        const tickets = await r.json();
+        if (!tickets.length) {
+          list.innerHTML = `
+            <div class="py-16 text-center">
+              <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-surface-100 flex items-center justify-center text-surface-400">
+                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+              </div>
+              <p class="text-surface-500 font-medium">No tickets yet</p>
+              <p class="text-surface-400 text-sm mt-1">Create one above to see triage, routing, and drafts here.</p>
+            </div>
+          `;
+          return;
+        }
+        list.innerHTML = tickets.map(t => `
+          <div class="ticket-row flex items-center justify-between py-3 px-4 rounded-xl cursor-pointer group" data-id="${t.id}">
+            <div class="min-w-0 flex-1">
+              <span class="font-medium text-surface-800 truncate block group-hover:text-brand-600 transition-colors">${escapeHtml(t.subject)}</span>
+              <span class="text-surface-500 text-xs mt-0.5">${formatDate(t.created_at)} · ${escapeHtml(t.assigned_team || 'Unassigned')}</span>
+            </div>
+            <div class="ml-4 flex items-center gap-2">
+              ${priorityBadge(t.priority)}
+              <svg class="w-4 h-4 text-surface-400 group-hover:text-brand-500 transition-colors shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg>
+            </div>
+          </div>
+        `).join('');
+        list.querySelectorAll('[data-id]').forEach(el => {
+          el.addEventListener('click', () => {
+            openDetail();
+            loadTicketDetail(el.dataset.id);
+          });
+        });
+      } catch (err) {
+        list.innerHTML = '<p class="text-red-600 py-6">Could not load tickets. Is the API running?</p>';
+      }
+    }
+
+    async function loadTicketDetail(id) {
+      currentDetailId = id;
+      const body = document.getElementById('ticket-detail-body');
+      const auditEl = document.getElementById('audit-log');
+      body.innerHTML = '<div class="flex items-center justify-center py-20"><div class="animate-pulse text-surface-400">Loading…</div></div>';
+      auditEl.innerHTML = '';
+      try {
+        const [tRes, aRes] = await Promise.all([
+          fetch(API + '/tickets/' + id),
+          fetch(API + '/tickets/' + id + '/audit'),
+        ]);
+        const ticket = tRes.ok ? await tRes.json() : null;
+        const audit = aRes.ok ? await aRes.json() : [];
+        if (!ticket) {
+          body.innerHTML = '<p class="text-red-600 py-8">Ticket not found.</p>';
+          return;
+        }
+        const statusPill = ticket.draft_reply
+          ? '<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Processed</span>'
+          : '<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800"><span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>Processing</span>';
+        body.innerHTML = `
+          <div class="flex items-center justify-between gap-2 mb-2">
+            <h3 class="text-base font-semibold text-surface-900 truncate">${escapeHtml(ticket.subject)}</h3>
+            ${statusPill}
+          </div>
+          <p class="text-xs text-surface-500 mb-4">${formatDate(ticket.created_at)}</p>
+          <div class="rounded-2xl border border-surface-200/80 bg-white p-4 mb-4">
+            <p class="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">Customer message</p>
+            <div class="text-surface-700 whitespace-pre-wrap leading-relaxed">${escapeHtml(ticket.body)}</div>
+          </div>
+          <div class="rounded-2xl border border-surface-200/80 bg-white p-4 mb-4">
+            <p class="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-3">Triage & routing</p>
+            <div class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+              <div><span class="text-surface-500 block text-xs">Priority</span><span class="font-medium text-surface-800">${priorityBadge(ticket.priority) || '—'}</span></div>
+              <div><span class="text-surface-500 block text-xs">Category</span><span class="font-medium text-surface-800">${escapeHtml(ticket.category || '—')}</span></div>
+              <div><span class="text-surface-500 block text-xs">Sentiment</span><span class="font-medium text-surface-800">${escapeHtml(ticket.sentiment || '—')}</span></div>
+              <div><span class="text-surface-500 block text-xs">Needs human</span><span class="font-medium text-surface-800">${ticket.needs_human == null ? '—' : (ticket.needs_human ? 'Yes' : 'No')}</span></div>
+              <div><span class="text-surface-500 block text-xs">Team</span><span class="font-medium text-surface-800">${escapeHtml(ticket.assigned_team || '—')}</span></div>
+              <div><span class="text-surface-500 block text-xs">SLA</span><span class="font-medium text-surface-800">${escapeHtml(ticket.sla_bucket || '—')}</span></div>
+            </div>
+            ${ticket.summary ? `<p class="text-surface-500 block text-xs mt-3 mb-1">Summary</p><p class="text-surface-700 text-sm">${escapeHtml(ticket.summary)}</p>` : ''}
+          </div>
+          <div class="rounded-2xl border ${ticket.draft_reply ? 'border-brand-200/80 bg-brand-50/50' : 'border-surface-200/80 bg-surface-50/50'} p-4">
+            <p class="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">Draft reply</p>
+            ${ticket.draft_reply
+              ? `<div class="text-surface-800 whitespace-pre-wrap leading-relaxed text-sm">${escapeHtml(ticket.draft_reply)}</div>`
+              : '<p class="text-surface-500 italic text-sm">Pipeline is running. Click <strong>Refresh</strong> above in a few seconds to see the draft.</p>'}
+          </div>
+        `;
+        auditEl.innerHTML = audit.length
+          ? audit.map(a => {
+              const isError = a.event_type === 'processing_error';
+              const errMsg = a.payload && a.payload.error ? a.payload.error : (a.payload && Object.keys(a.payload).length ? JSON.stringify(a.payload) : '');
+              return `<div class="flex flex-col gap-1 py-2.5 px-3 rounded-xl text-sm ${isError ? 'bg-red-50 border border-red-100' : 'bg-surface-100/80'}"><div class="flex gap-3 items-center"><span class="text-surface-500 shrink-0 text-xs">${formatDate(a.created_at)}</span><span class="font-medium ${isError ? 'text-red-700' : 'text-surface-700'}">${escapeHtml(a.event_type)}</span></div>${errMsg ? `<pre class="text-xs ${isError ? 'text-red-600' : 'text-surface-500'} overflow-x-auto mt-1 break-all whitespace-pre-wrap">${escapeHtml(errMsg)}</pre>` : ''}</div>`;
+            }).join('')
+          : '<p class="text-surface-500 py-3 text-sm">No audit entries yet.</p>';
+      } catch (err) {
+        body.innerHTML = '<p class="text-red-600 py-8">Could not load ticket.</p>';
+      }
+    }
+
+    document.getElementById('refresh-list').addEventListener('click', () => { loadTickets(); });
+
+    function escapeHtml(s) {
+      if (s == null) return '';
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    loadTickets();
+  </script>
+</body>
+</html>
