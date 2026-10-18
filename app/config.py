@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     anthropic_effort: str = "low"
     anthropic_refusal_fallback: bool = True
 
+    # Extra or corrected prices, USD per million tokens: {"model": [input, output]}
+    llm_price_overrides: dict[str, tuple[float, float]] = {}
+
 
 class HealthStatus(BaseModel):
     status: str

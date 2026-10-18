@@ -30,6 +30,7 @@ from .celery_app import celery_app
 from .config import get_settings
 from .db import PIPELINE_STEPS, SessionLocal, StepStatus, Ticket, TicketStatus, utcnow
 from .llm import TransientLLMError
+from .llm.pricing import usage_record
 from .routing import route_ticket
 from .schemas import TriageResult
 
@@ -41,6 +42,16 @@ RETRYABLE_ERRORS = (TransientLLMError, SoftTimeLimitExceeded)
 
 def _get_db() -> Session:
     return SessionLocal()
+
+
+def _usage(usage) -> dict:
+    record = usage_record(usage, settings.llm_price_overrides)
+    logger.info(
+        "LLM call: provider=%s model=%s in=%s out=%s cost_usd=%s latency_ms=%s",
+        record["provider"], record["model"], record["input_tokens"],
+        record["output_tokens"], record["cost_usd"], record["latency_ms"],
+    )
+    return record
 
 
 def _error_payload(exc: BaseException, **extra) -> dict:
@@ -90,7 +101,7 @@ def _run_pipeline(db: Session, ticket: Ticket) -> None:
 
     # Triage
     if ticket.triage_status != StepStatus.COMPLETED:
-        triage, _usage = run_triage_agent(
+        triage, usage = run_triage_agent(
             {
                 "subject": ticket.subject,
                 "body": ticket.body,
@@ -106,7 +117,14 @@ def _run_pipeline(db: Session, ticket: Ticket) -> None:
             t.needs_human = triage.needs_human
             t.summary = triage.summary
 
-        _commit_step(db, ticket_id, "triage", apply_triage, "triage_completed", triage.model_dump())
+        _commit_step(
+            db,
+            ticket_id,
+            "triage",
+            apply_triage,
+            "triage_completed",
+            {**triage.model_dump(), "llm": _usage(usage)},
+        )
     ticket = db.get(Ticket, ticket_id)
     triage = _triage_from_ticket(ticket)
 
@@ -126,7 +144,7 @@ def _run_pipeline(db: Session, ticket: Ticket) -> None:
     # Drafting
     ticket = db.get(Ticket, ticket_id)
     if ticket.drafting_status != StepStatus.COMPLETED:
-        draft, _usage = run_drafting_agent(ticket_body=ticket.body, triage=triage)
+        draft, usage = run_drafting_agent(ticket_body=ticket.body, triage=triage)
 
         def apply_draft(t: Ticket) -> None:
             t.draft_reply = draft.draft_reply
@@ -137,7 +155,7 @@ def _run_pipeline(db: Session, ticket: Ticket) -> None:
             "drafting",
             apply_draft,
             "draft_created",
-            {"length": len(draft.draft_reply or "")},
+            {"length": len(draft.draft_reply or ""), "llm": _usage(usage)},
         )
 
 
