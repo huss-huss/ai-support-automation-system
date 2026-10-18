@@ -31,6 +31,7 @@ from .config import get_settings
 from .db import PIPELINE_STEPS, SessionLocal, StepStatus, Ticket, TicketStatus, utcnow
 from .llm import TransientLLMError
 from .llm.pricing import usage_record
+from .logging_config import request_id_var, ticket_id_var
 from .routing import route_ticket
 from .schemas import TriageResult
 
@@ -164,6 +165,7 @@ class ProcessTicketTask(Task):
         ticket_id = args[0] if args else kwargs.get("ticket_id")
         if ticket_id:
             mark_ticket_failed(ticket_id, exc, attempt=self.request.retries + 1)
+        logger.error("Giving up on ticket %s: %s: %s", ticket_id, type(exc).__name__, exc)
 
 
 def mark_ticket_failed(ticket_id: str, exc: BaseException, *, attempt: int) -> None:
@@ -199,11 +201,16 @@ def mark_ticket_failed(ticket_id: str, exc: BaseException, *, attempt: int) -> N
     retry_backoff_max=settings.task_retry_backoff_max_seconds,
     retry_jitter=True,
 )
-def process_ticket(self: Task, ticket_id: str) -> str | None:
+def process_ticket(self: Task, ticket_id: str, request_id: str | None = None) -> str | None:
     """
     Orchestrates triage, routing, and drafting for a ticket. Safe to call
     repeatedly for the same ticket; returns the final ticket status.
+
+    ``request_id`` is the ID of the HTTP request that enqueued the ticket, so
+    worker logs can be joined with API logs.
     """
+    request_token = request_id_var.set(request_id)
+    ticket_token = ticket_id_var.set(ticket_id)
     db = _get_db()
     try:
         ticket = db.get(Ticket, ticket_id)
@@ -255,3 +262,5 @@ def process_ticket(self: Task, ticket_id: str) -> str | None:
         return ticket.status
     finally:
         db.close()
+        request_id_var.reset(request_token)
+        ticket_id_var.reset(ticket_token)

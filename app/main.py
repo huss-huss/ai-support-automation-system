@@ -1,19 +1,27 @@
 import logging
+import re
+import time
+import uuid
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
+from . import health as health_checks
 from .audit import add_audit_log
 from .config import HealthStatus, get_settings
 from .db import PIPELINE_STEPS, SessionLocal, StepStatus, Ticket, TicketStatus
+from .logging_config import configure_logging, request_id_var, ticket_id_var
 from .schemas import AuditLogRead, TicketCreate, TicketRead
 from .tasks import process_ticket
 
 settings = get_settings()
+configure_logging(settings.log_level, settings.log_format)
 logger = logging.getLogger(__name__)
+
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def get_db() -> Session:
@@ -39,9 +47,47 @@ app.add_middleware(
 )
 
 
-@app.get("/health", response_model=HealthStatus)
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Assign a request ID (or accept a well-formed X-Request-ID) and log the request."""
+    incoming = request.headers.get("x-request-id", "")
+    request_id = incoming if _REQUEST_ID_RE.match(incoming) else uuid.uuid4().hex
+    token = request_id_var.set(request_id)
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        logger.info(
+            "request completed",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": status_code,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            },
+        )
+        request_id_var.reset(token)
+
+
+@app.get("/health", response_model=HealthStatus, include_in_schema=False)
+@app.get("/healthz", response_model=HealthStatus)
 def health() -> HealthStatus:
+    """Liveness: the process is up and serving. Does not touch dependencies."""
     return HealthStatus(status="ok")
+
+
+@app.get("/readyz")
+def ready() -> JSONResponse:
+    """Readiness: database and broker are reachable. 503 otherwise."""
+    healthy, checks = health_checks.run_checks()
+    return JSONResponse(
+        status_code=200 if healthy else 503,
+        content={"status": "ready" if healthy else "not_ready", "checks": checks},
+    )
 
 
 @app.post("/tickets", response_model=TicketRead, status_code=201)
@@ -66,8 +112,9 @@ def _enqueue(db: Session, ticket: Ticket) -> None:
     not turn into a lost ticket or a 500: record it and let the client (or an
     operator) call /reprocess later.
     """
+    ticket_id_var.set(ticket.id)
     try:
-        process_ticket.delay(ticket.id)
+        process_ticket.delay(ticket.id, request_id=request_id_var.get())
     except Exception as exc:  # noqa: BLE001 - any broker/transport failure
         logger.exception("Failed to enqueue ticket %s", ticket.id)
         add_audit_log(

@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     app_name: str = "Multi-Agent Customer Support Automation System"
     environment: str = "development"
     debug: bool = False
+    log_level: str = "INFO"
+    log_format: str = "json"  # "json" | "text"
 
     database_url: str = "postgresql+psycopg://support_user:support_pass@postgres:5432/support_db"
 
