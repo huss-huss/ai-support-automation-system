@@ -12,9 +12,11 @@ from sqlalchemy.orm import Session
 from . import health as health_checks
 from .audit import add_audit_log
 from .config import HealthStatus, get_settings
-from .db import PIPELINE_STEPS, SessionLocal, StepStatus, Ticket, TicketStatus
+from .db import PIPELINE_STEPS, AuditLog, SessionLocal, StepStatus, Ticket, TicketStatus
+from .limits import BodySizeLimitMiddleware
 from .logging_config import configure_logging, request_id_var, ticket_id_var
 from .schemas import AuditLogRead, TicketCreate, TicketRead
+from .security import require_api_key
 from .tasks import process_ticket
 
 settings = get_settings()
@@ -38,13 +40,16 @@ app = FastAPI(
     debug=settings.debug,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+if settings.cors_origin_list:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origin_list,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-API-Key", "X-Request-ID"],
+        expose_headers=["X-Request-ID"],
+    )
 
 
 @app.middleware("http")
@@ -91,7 +96,11 @@ def ready() -> JSONResponse:
 
 
 @app.post("/tickets", response_model=TicketRead, status_code=201)
-def ingest_ticket(payload: TicketCreate, db: Session = Depends(get_db)) -> TicketRead:
+def ingest_ticket(
+    payload: TicketCreate,
+    db: Session = Depends(get_db),
+    caller: str = Depends(require_api_key),
+) -> TicketRead:
     ticket = Ticket(
         subject=payload.subject,
         body=payload.body,
@@ -99,6 +108,14 @@ def ingest_ticket(payload: TicketCreate, db: Session = Depends(get_db)) -> Ticke
         channel=payload.channel,
     )
     db.add(ticket)
+    db.flush()
+    add_audit_log(
+        db,
+        ticket_id=ticket.id,
+        event_type="ticket_created",
+        payload={"api_key": caller, "request_id": request_id_var.get()},
+        commit=False,
+    )
     db.commit()
     db.refresh(ticket)
 
@@ -127,7 +144,11 @@ def _enqueue(db: Session, ticket: Ticket) -> None:
 
 
 @app.post("/tickets/{ticket_id}/reprocess", response_model=TicketRead, status_code=202)
-def reprocess_ticket(ticket_id: str, db: Session = Depends(get_db)) -> TicketRead:
+def reprocess_ticket(
+    ticket_id: str,
+    db: Session = Depends(get_db),
+    caller: str = Depends(require_api_key),
+) -> TicketRead:
     """
     Re-queue a ticket that failed or never got processed. Completed steps are
     kept; only failed or pending steps run again.
@@ -142,7 +163,13 @@ def reprocess_ticket(ticket_id: str, db: Session = Depends(get_db)) -> TicketRea
         if getattr(ticket, f"{step}_status") == StepStatus.FAILED:
             setattr(ticket, f"{step}_status", StepStatus.PENDING)
     ticket.status = TicketStatus.PENDING
-    add_audit_log(db, ticket_id=ticket.id, event_type="reprocess_requested", commit=False)
+    add_audit_log(
+        db,
+        ticket_id=ticket.id,
+        event_type="reprocess_requested",
+        payload={"api_key": caller, "request_id": request_id_var.get()},
+        commit=False,
+    )
     db.commit()
 
     _enqueue(db, ticket)
@@ -165,8 +192,6 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db)) -> TicketRead:
 
 @app.get("/tickets/{ticket_id}/audit", response_model=list[AuditLogRead])
 def get_ticket_audit(ticket_id: str, db: Session = Depends(get_db)) -> list[AuditLogRead]:
-    from .db import AuditLog  # local import to avoid circular
-
     logs = db.query(AuditLog).filter(AuditLog.ticket_id == ticket_id).order_by(
         AuditLog.created_at
     )

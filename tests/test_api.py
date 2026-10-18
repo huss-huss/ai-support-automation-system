@@ -1,13 +1,9 @@
 import pytest
-from fastapi.testclient import TestClient
-
-from app.main import app
 
 
 @pytest.fixture
-def client(fake_openai):
-    with TestClient(app) as c:
-        yield c
+def client(api_client):
+    return api_client
 
 
 def _create(client, **overrides):
@@ -50,7 +46,7 @@ def test_get_unknown_ticket_returns_404(client):
 def test_audit_trail(client):
     ticket_id = _create(client).json()["id"]
     events = [e["event_type"] for e in client.get(f"/tickets/{ticket_id}/audit").json()]
-    assert events == ["triage_completed", "routing_completed", "draft_created"]
+    assert events == ["ticket_created", "triage_completed", "routing_completed", "draft_created"]
 
 
 def test_ticket_exposes_processing_status(client):
@@ -78,7 +74,7 @@ def test_enqueue_failure_keeps_ticket_and_allows_reprocess(client, monkeypatch):
     ticket = resp.json()
     assert ticket["status"] == "pending"
     events = [e["event_type"] for e in client.get(f"/tickets/{ticket['id']}/audit").json()]
-    assert events == ["enqueue_failed"]
+    assert events == ["ticket_created", "enqueue_failed"]
 
     broker_up = True
     resp = client.post(f"/tickets/{ticket['id']}/reprocess")
@@ -102,5 +98,5 @@ def test_reprocess_resets_failed_step(client, fake_openai):
     resp = client.post(f"/tickets/{ticket['id']}/reprocess")
     assert resp.json()["status"] == "completed"
     events = [e["event_type"] for e in client.get(f"/tickets/{ticket['id']}/audit").json()]
-    assert events[:2] == ["processing_error", "reprocess_requested"]
+    assert events[:3] == ["ticket_created", "processing_error", "reprocess_requested"]
     assert events[-1] == "draft_created"

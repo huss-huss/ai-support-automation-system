@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "json"  # "json" | "text"
 
+    # Write endpoints require X-API-Key matching one of these (comma-separated).
+    api_keys: str = ""
+    auth_disabled: bool = False
+    # Browser origins allowed to call the API cross-origin (comma-separated).
+    # Empty means same-origin only, which is all the bundled dashboard needs.
+    cors_origins: str = ""
+    max_request_bytes: int = 64 * 1024
+
     database_url: str = "postgresql+psycopg://support_user:support_pass@postgres:5432/support_db"
 
     redis_url: str = "redis://redis:6379/0"
@@ -58,6 +66,14 @@ class Settings(BaseSettings):
 
     # Extra or corrected prices, USD per million tokens: {"model": [input, output]}
     llm_price_overrides: dict[str, tuple[float, float]] = {}
+
+    @property
+    def api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.api_keys.split(",") if k.strip()]
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 class HealthStatus(BaseModel):

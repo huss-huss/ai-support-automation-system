@@ -3,17 +3,14 @@ import json
 import logging
 
 import pytest
-from fastapi.testclient import TestClient
 
 import app.health as health
 from app.logging_config import build_handler, request_id_var, ticket_id_var
-from app.main import app
 
 
 @pytest.fixture
-def client(fake_openai):
-    with TestClient(app) as c:
-        yield c
+def client(api_client):
+    return api_client
 
 
 @pytest.fixture

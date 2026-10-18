@@ -1,41 +1,53 @@
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://support_user:support_pass@postgres:5432/support_db
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  ENVIRONMENT: development
+  LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  API_KEYS: ${API_KEYS:?set API_KEYS (comma-separated) to protect write endpoints}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+
 services:
   api:
     build: .
     container_name: support_api
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-    environment:
-      DATABASE_URL: postgresql+psycopg://support_user:support_pass@postgres:5432/support_db
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      APP_ENVIRONMENT: development
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment: *app-env
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   worker:
     build: .
     container_name: support_worker
     command: celery -A app.celery_app worker --loglevel=info
-    environment:
-      DATABASE_URL: postgresql+psycopg://support_user:support_pass@postgres:5432/support_db
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      APP_ENVIRONMENT: development
+    environment: *app-env
     depends_on:
-      - postgres
-      - redis
+      api:
+        condition: service_healthy
 
   redis:
     image: redis:7.4-alpine
     container_name: support_redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   postgres:
     image: postgres:16-alpine
@@ -48,7 +60,11 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U support_user -d support_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   postgres_data:
-

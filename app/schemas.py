@@ -3,13 +3,29 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Input limits. Bodies beyond a few pages are almost always pasted logs or
+# abuse, and every character is paid for twice (triage + drafting).
+MAX_SUBJECT_CHARS = 300
+MAX_BODY_CHARS = 20_000
+MAX_ID_CHARS = 128
+MAX_CHANNEL_CHARS = 32
+
 
 class TicketCreate(BaseModel):
-    subject: str = Field(..., description="Short subject or title for the ticket")
-    body: str = Field(..., description="Full customer message body")
-    customer_id: Optional[str] = Field(None, description="External customer identifier")
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    subject: str = Field(
+        ..., min_length=1, max_length=MAX_SUBJECT_CHARS,
+        description="Short subject or title for the ticket",
+    )
+    body: str = Field(
+        ..., min_length=1, max_length=MAX_BODY_CHARS, description="Full customer message body"
+    )
+    customer_id: Optional[str] = Field(
+        None, max_length=MAX_ID_CHARS, description="External customer identifier"
+    )
     channel: Optional[str] = Field(
-        None, description="Source channel, e.g. email, chat, web"
+        None, max_length=MAX_CHANNEL_CHARS, description="Source channel, e.g. email, chat, web"
     )
 
 
