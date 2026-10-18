@@ -15,6 +15,9 @@ os.environ["DATABASE_URL"] = os.environ.get(
 )
 # Never reach a real LLM or broker from the test suite, even if .env has keys.
 os.environ["OPENAI_API_KEY"] = ""
+os.environ["ANTHROPIC_API_KEY"] = ""
+os.environ["LLM_PROVIDER"] = "fake"
+os.environ["ENVIRONMENT"] = "test"
 os.environ["CELERY_BROKER_URL"] = "memory://"
 os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
 
@@ -24,6 +27,7 @@ from alembic.config import Config  # noqa: E402
 
 from app.celery_app import celery_app  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
+from app.llm.openai_provider import OpenAIProvider  # noqa: E402
 from tests.fakes import FakeOpenAIClient  # noqa: E402
 
 celery_app.conf.update(task_always_eager=True, task_eager_propagates=True)
@@ -61,9 +65,20 @@ def db():
 
 
 @pytest.fixture
-def fake_openai(monkeypatch):
-    """Route every agent call through an in-memory fake OpenAI client."""
+def use_provider(monkeypatch):
+    """Install an LLM provider for every agent call made during the test."""
+
+    def install(provider):
+        monkeypatch.setattr("app.agents_triage.get_llm_provider", lambda: provider)
+        monkeypatch.setattr("app.agents_drafting.get_llm_provider", lambda: provider)
+        return provider
+
+    return install
+
+
+@pytest.fixture
+def fake_openai(use_provider):
+    """The real OpenAIProvider wired to an in-memory fake OpenAI client."""
     client = FakeOpenAIClient()
-    monkeypatch.setattr("app.agents_triage._get_client", lambda: client)
-    monkeypatch.setattr("app.agents_drafting._get_client", lambda: client)
+    use_provider(OpenAIProvider(client, models={"triage": "m-triage", "drafting": "m-draft"}))
     return client

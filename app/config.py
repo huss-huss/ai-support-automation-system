@@ -27,9 +27,24 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://redis:6379/1"
     celery_result_backend: str = "redis://redis:6379/2"
 
+    # LLM provider: "auto" picks openai, then anthropic, based on which API key is
+    # set, and falls back to the deterministic fake provider outside production.
+    llm_provider: str = "auto"
+    llm_timeout_seconds: float = 30.0
+    # Kept low on purpose: longer backoff is handled by Celery task retries.
+    llm_sdk_max_retries: int = 1
+
     openai_api_key: str | None = None
     openai_model_triage: str = "gpt-4o-mini"
     openai_model_drafting: str = "gpt-4o-mini"
+
+    anthropic_api_key: str | None = None
+    anthropic_model_triage: str = "claude-opus-5-5"
+    anthropic_model_drafting: str = "claude-opus-5-5"
+    # Triage is classification and drafting is short-form; low effort keeps
+    # latency and thinking-token spend down. Raise it if quality needs it.
+    anthropic_effort: str = "low"
+    anthropic_refusal_fallback: bool = True
 
 
 class HealthStatus(BaseModel):

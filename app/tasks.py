@@ -35,7 +35,7 @@ def process_ticket(ticket_id: str) -> None:
         }
 
         # Triage
-        triage = run_triage_agent(ticket_dict)
+        triage, _ = run_triage_agent(ticket_dict)
         ticket.priority = triage.priority
         ticket.category = triage.category
         ticket.sentiment = triage.sentiment
@@ -65,7 +65,7 @@ def process_ticket(ticket_id: str) -> None:
         )
 
         # Drafting
-        draft = run_drafting_agent(ticket_body=ticket.body, triage=triage)
+        draft, _ = run_drafting_agent(ticket_body=ticket.body, triage=triage)
         ticket.draft_reply = draft.draft_reply
         db.add(ticket)
         db.commit()

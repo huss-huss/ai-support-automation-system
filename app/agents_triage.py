@@ -1,23 +1,24 @@
 import json
 from typing import Any
 
-from openai import OpenAI
+from pydantic import ValidationError
 
-from .config import get_settings
+from .llm import LLMError, LLMProvider, LLMRequest, LLMUsage, get_llm_provider
 from .schemas import TriageResult
 
-
-def _get_client() -> OpenAI:
-    settings = get_settings()
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
-    return OpenAI(api_key=settings.openai_api_key)
+SYSTEM_PROMPT = (
+    "You are a customer support triage system. "
+    "Classify the ticket into priority, category, sentiment, "
+    "whether it needs a human agent, and provide a short summary. "
+    "You must respond ONLY with JSON matching the provided JSON schema. "
+    "Do not include any extra keys or text."
+)
 
 
 def _strict_schema(schema: dict) -> dict:
     """
     Recursively add additionalProperties: false and required to every object
-    in the schema, as required by OpenAI strict structured output.
+    in the schema, as required by strict structured output.
     """
     schema = dict(schema)
     if schema.get("type") == "object":
@@ -31,25 +32,10 @@ def _strict_schema(schema: dict) -> dict:
     return schema
 
 
-def run_triage_agent(ticket: dict[str, Any], *, client: OpenAI | None = None) -> TriageResult:
-    """
-    Call OpenAI to classify a ticket and return a validated TriageResult.
+TRIAGE_SCHEMA = _strict_schema(TriageResult.model_json_schema())
 
-    ``client`` can be injected (tests pass a fake); by default one is built
-    from settings.
-    """
-    client = client or _get_client()
 
-    schema = _strict_schema(TriageResult.model_json_schema())
-
-    system_prompt = (
-        "You are a customer support triage system. "
-        "Classify the ticket into priority, category, sentiment, "
-        "whether it needs a human agent, and provide a short summary. "
-        "You must respond ONLY with JSON matching the provided JSON schema. "
-        "Do not include any extra keys or text."
-    )
-
+def build_triage_request(ticket: dict[str, Any]) -> LLMRequest:
     user_content = (
         "Classify this ticket:\n\n"
         f"Subject: {ticket.get('subject')}\n\n"
@@ -57,24 +43,29 @@ def run_triage_agent(ticket: dict[str, Any], *, client: OpenAI | None = None) ->
         f"Channel: {ticket.get('channel')}\n"
         f"Customer ID: {ticket.get('customer_id')}"
     )
-
-    response = client.chat.completions.create(
-        model=get_settings().openai_model_triage,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "triage_result",
-                "schema": schema,
-                "strict": True,
-            },
-        },
+    return LLMRequest(
+        purpose="triage",
+        system=SYSTEM_PROMPT,
+        user=user_content,
+        json_schema=TRIAGE_SCHEMA,
+        schema_name="triage_result",
+        max_output_tokens=2048,
     )
 
-    content = response.choices[0].message.content
-    data = json.loads(content)
-    return TriageResult.model_validate(data)
 
+def run_triage_agent(
+    ticket: dict[str, Any], *, provider: LLMProvider | None = None
+) -> tuple[TriageResult, LLMUsage]:
+    """
+    Classify a ticket and return a validated TriageResult plus LLM usage.
+
+    Output that is not valid JSON or does not match the schema raises LLMError
+    (not retryable: with strict structured output this indicates a real bug).
+    """
+    provider = provider or get_llm_provider()
+    response = provider.complete(build_triage_request(ticket))
+    try:
+        result = TriageResult.model_validate(json.loads(response.text))
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise LLMError(f"triage output failed validation: {exc}") from exc
+    return result, response.usage
