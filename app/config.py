@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://redis:6379/1"
     celery_result_backend: str = "redis://redis:6379/2"
 
+    # Celery task reliability. Transient LLM failures are retried with
+    # exponential backoff (backoff * 2**n seconds, jittered, capped).
+    task_max_retries: int = 5
+    task_retry_backoff_seconds: int = 2
+    task_retry_backoff_max_seconds: int = 300
+    task_soft_time_limit_seconds: int = 120
+    task_time_limit_seconds: int = 150
+
     # LLM provider: "auto" picks openai, then anthropic, based on which API key is
     # set, and falls back to the deterministic fake provider outside production.
     llm_provider: str = "auto"

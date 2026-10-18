@@ -7,6 +7,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
     create_engine,
@@ -31,6 +32,23 @@ engine = make_engine(get_settings().database_url)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
 
 Base = declarative_base()
+
+
+class TicketStatus:
+    PENDING = "pending"
+    PROCESSING = "processing"
+    RETRYING = "retrying"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class StepStatus:
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+PIPELINE_STEPS = ("triage", "routing", "drafting")
 
 
 def utcnow() -> datetime:
@@ -64,6 +82,20 @@ class Ticket(Base):
 
     # Drafting metadata
     draft_reply = Column(Text, nullable=True)
+
+    # Processing state. Each pipeline step records its own status so a retried
+    # task can skip work that already completed.
+    status = Column(String, nullable=False, default=TicketStatus.PENDING,
+                    server_default=TicketStatus.PENDING, index=True)
+    triage_status = Column(String, nullable=False, default=StepStatus.PENDING,
+                           server_default=StepStatus.PENDING)
+    routing_status = Column(String, nullable=False, default=StepStatus.PENDING,
+                            server_default=StepStatus.PENDING)
+    drafting_status = Column(String, nullable=False, default=StepStatus.PENDING,
+                             server_default=StepStatus.PENDING)
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_error = Column(Text, nullable=True)
+    processed_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(

@@ -30,7 +30,10 @@ from app.db import Base, SessionLocal, engine  # noqa: E402
 from app.llm.openai_provider import OpenAIProvider  # noqa: E402
 from tests.fakes import FakeOpenAIClient  # noqa: E402
 
-celery_app.conf.update(task_always_eager=True, task_eager_propagates=True)
+# Eager mode runs tasks inline. Propagation stays off so failures go through
+# Celery's normal handling (retries, on_failure) as they would on a worker;
+# EagerResult.get() still re-raises a final failure.
+celery_app.conf.update(task_always_eager=True, task_eager_propagates=False)
 
 
 def alembic_config(url: str) -> Config:

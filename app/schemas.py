@@ -53,6 +53,14 @@ class TicketRead(BaseModel):
 
     draft_reply: Optional[str]
 
+    status: str
+    triage_status: str
+    routing_status: str
+    drafting_status: str
+    attempts: int
+    last_error: Optional[str]
+    processed_at: Optional[datetime]
+
     created_at: datetime
     updated_at: datetime
 

@@ -302,9 +302,12 @@
           body.innerHTML = '<p class="text-red-600 py-8">Ticket not found.</p>';
           return;
         }
-        const statusPill = ticket.draft_reply
-          ? '<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Processed</span>'
-          : '<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800"><span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>Processing</span>';
+        const pill = (bg, text, dot, label, pulse) => `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${bg} ${text}"><span class="w-1.5 h-1.5 rounded-full ${dot} ${pulse ? 'animate-pulse' : ''}"></span>${label}</span>`;
+        const statusPill = {
+          completed: pill('bg-emerald-100', 'text-emerald-800', 'bg-emerald-500', 'Processed', false),
+          failed: pill('bg-red-100', 'text-red-800', 'bg-red-500', 'Failed', false),
+          retrying: pill('bg-amber-100', 'text-amber-800', 'bg-amber-500', 'Retrying', true),
+        }[ticket.status] || pill('bg-amber-100', 'text-amber-800', 'bg-amber-500', 'Processing', true);
         body.innerHTML = `
           <div class="flex items-center justify-between gap-2 mb-2">
             <h3 class="text-base font-semibold text-surface-900 truncate">${escapeHtml(ticket.subject)}</h3>
@@ -336,7 +339,7 @@
         `;
         auditEl.innerHTML = audit.length
           ? audit.map(a => {
-              const isError = a.event_type === 'processing_error';
+              const isError = ['processing_error', 'enqueue_failed', 'step_retry_scheduled'].includes(a.event_type);
               const errMsg = a.payload && a.payload.error ? a.payload.error : (a.payload && Object.keys(a.payload).length ? JSON.stringify(a.payload) : '');
               return `<div class="flex flex-col gap-1 py-2.5 px-3 rounded-xl text-sm ${isError ? 'bg-red-50 border border-red-100' : 'bg-surface-100/80'}"><div class="flex gap-3 items-center"><span class="text-surface-500 shrink-0 text-xs">${formatDate(a.created_at)}</span><span class="font-medium ${isError ? 'text-red-700' : 'text-surface-700'}">${escapeHtml(a.event_type)}</span></div>${errMsg ? `<pre class="text-xs ${isError ? 'text-red-600' : 'text-surface-500'} overflow-x-auto mt-1 break-all whitespace-pre-wrap">${escapeHtml(errMsg)}</pre>` : ''}</div>`;
             }).join('')
