@@ -2,7 +2,7 @@ services:
   api:
     build: .
     container_name: support_api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
       DATABASE_URL: postgresql+psycopg://support_user:support_pass@postgres:5432/support_db
       REDIS_URL: redis://redis:6379/0

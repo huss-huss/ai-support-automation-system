@@ -84,9 +84,3 @@ class AuditLog(Base):
 
     ticket = relationship("Ticket", back_populates="audit_logs")
 
-
-def init_db() -> None:
-    """
-    Initialize database tables. For production, prefer Alembic migrations.
-    """
-    Base.metadata.create_all(bind=engine)

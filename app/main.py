@@ -1,4 +1,3 @@
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -7,7 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .config import HealthStatus, get_settings
-from .db import SessionLocal, Ticket, init_db
+from .db import SessionLocal, Ticket
 from .schemas import AuditLogRead, TicketCreate, TicketRead
 from .tasks import process_ticket
 
@@ -22,17 +21,10 @@ def get_db() -> Session:
         db.close()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    yield
-
-
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     debug=settings.debug,
-    lifespan=lifespan,
 )
 
 app.add_middleware(

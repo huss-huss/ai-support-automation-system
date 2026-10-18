@@ -19,6 +19,8 @@ os.environ["CELERY_BROKER_URL"] = "memory://"
 os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
 
 import pytest  # noqa: E402
+from alembic import command  # noqa: E402
+from alembic.config import Config  # noqa: E402
 
 from app.celery_app import celery_app  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
@@ -27,10 +29,25 @@ from tests.fakes import FakeOpenAIClient  # noqa: E402
 celery_app.conf.update(task_always_eager=True, task_eager_propagates=True)
 
 
+def alembic_config(url: str) -> Config:
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", url)
+    cfg.attributes["configure_logger"] = False
+    return cfg
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _migrated_db():
+    # The schema under test is the one produced by migrations, not create_all.
+    command.upgrade(alembic_config(os.environ["DATABASE_URL"]), "head")
+    yield
+
+
 @pytest.fixture(autouse=True)
-def _clean_db():
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+def _clean_db(_migrated_db):
+    with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
     yield
 
 
