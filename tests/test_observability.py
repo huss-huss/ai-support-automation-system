@@ -108,3 +108,12 @@ def test_redis_check_pings_broker(monkeypatch):
     monkeypatch.setattr(health.redis.Redis, "from_url", lambda url, **kw: FakeRedis())
     assert health.check_redis() == "ok"
     assert pinged == {"ok": True}
+
+
+def test_redis_transport_options_only_apply_to_redis_brokers():
+    # Regression: socket timeouts passed to a non-Redis transport (e.g. the
+    # SQLAlchemy broker) made every enqueue fail with a TypeError.
+    from app.celery_app import celery_app
+
+    assert celery_app.conf.broker_url == "memory://"
+    assert not celery_app.conf.broker_transport_options

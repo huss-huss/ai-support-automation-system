@@ -38,8 +38,11 @@ celery_app.conf.update(
         "interval_step": 0.2,
         "interval_max": 0.5,
     },
-    broker_transport_options={"socket_connect_timeout": 2, "socket_timeout": 5},
 )
+
+if settings.celery_broker_url.startswith(("redis://", "rediss://")):
+    # Socket timeouts are Redis-transport options; other transports reject them.
+    celery_app.conf.broker_transport_options = {"socket_connect_timeout": 2, "socket_timeout": 5}
 
 
 
