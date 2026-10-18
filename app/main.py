@@ -11,7 +11,6 @@ from .db import SessionLocal, Ticket, init_db
 from .schemas import AuditLogRead, TicketCreate, TicketRead
 from .tasks import process_ticket
 
-
 settings = get_settings()
 
 

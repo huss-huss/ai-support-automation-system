@@ -1,13 +1,12 @@
 from celery.utils.log import get_task_logger
 from sqlalchemy.orm import Session
 
-from .audit import add_audit_log
 from .agents_drafting import run_drafting_agent
 from .agents_triage import run_triage_agent
+from .audit import add_audit_log
 from .celery_app import celery_app
 from .db import SessionLocal, Ticket
 from .routing import route_ticket
-
 
 logger = get_task_logger(__name__)
 

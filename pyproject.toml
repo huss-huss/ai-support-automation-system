@@ -1,0 +1,24 @@
+[project]
+name = "ai-support-automation-system"
+version = "0.2.0"
+description = "Multi-agent customer support automation: FastAPI, PostgreSQL, Redis, Celery, LLM triage and drafting."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "BLE"]
+ignore = [
+    "UP045", # Optional[X] is kept in the existing schemas for readability
+]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "fastapi.Query", "fastapi.Security"]

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TicketCreate(BaseModel):
@@ -14,6 +14,9 @@ class TicketCreate(BaseModel):
 
 
 class TriageResult(BaseModel):
+    # Mirrors the strict JSON schema sent to the model: unknown keys are an error.
+    model_config = ConfigDict(extra="forbid")
+
     priority: Literal["low", "medium", "high", "urgent"]
     category: str
     sentiment: Literal["negative", "neutral", "positive"]
@@ -53,8 +56,7 @@ class TicketRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AuditLogRead(BaseModel):
@@ -64,6 +66,5 @@ class AuditLogRead(BaseModel):
     payload: dict | None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 

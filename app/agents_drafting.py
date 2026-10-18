@@ -4,22 +4,24 @@ from .config import get_settings
 from .schemas import DraftResult, TriageResult
 
 
-settings = get_settings()
-
-
 def _get_client() -> OpenAI:
+    settings = get_settings()
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     return OpenAI(api_key=settings.openai_api_key)
 
 
 def run_drafting_agent(
-    *, ticket_body: str, triage: TriageResult | None, previous_thread: str | None = None
+    *,
+    ticket_body: str,
+    triage: TriageResult | None,
+    previous_thread: str | None = None,
+    client: OpenAI | None = None,
 ) -> DraftResult:
     """
     Generate a draft reply for a ticket, grounding on triage metadata.
     """
-    client = _get_client()
+    client = client or _get_client()
 
     system_prompt = (
         "You are an expert customer support assistant. "
@@ -39,7 +41,7 @@ def run_drafting_agent(
         user_parts.append(previous_thread)
 
     response = client.chat.completions.create(
-        model=settings.openai_model_drafting,
+        model=get_settings().openai_model_drafting,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": "".join(user_parts)},

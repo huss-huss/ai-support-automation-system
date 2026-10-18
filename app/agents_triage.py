@@ -7,10 +7,8 @@ from .config import get_settings
 from .schemas import TriageResult
 
 
-settings = get_settings()
-
-
 def _get_client() -> OpenAI:
+    settings = get_settings()
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     return OpenAI(api_key=settings.openai_api_key)
@@ -33,11 +31,14 @@ def _strict_schema(schema: dict) -> dict:
     return schema
 
 
-def run_triage_agent(ticket: dict[str, Any]) -> TriageResult:
+def run_triage_agent(ticket: dict[str, Any], *, client: OpenAI | None = None) -> TriageResult:
     """
     Call OpenAI to classify a ticket and return a validated TriageResult.
+
+    ``client`` can be injected (tests pass a fake); by default one is built
+    from settings.
     """
-    client = _get_client()
+    client = client or _get_client()
 
     schema = _strict_schema(TriageResult.model_json_schema())
 
@@ -58,7 +59,7 @@ def run_triage_agent(ticket: dict[str, Any]) -> TriageResult:
     )
 
     response = client.chat.completions.create(
-        model=settings.openai_model_triage,
+        model=get_settings().openai_model_triage,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
