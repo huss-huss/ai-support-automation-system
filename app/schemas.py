@@ -29,15 +29,42 @@ class TicketCreate(BaseModel):
     )
 
 
+Priority = Literal["low", "medium", "high", "urgent"]
+# A closed taxonomy keeps routing deterministic and makes triage measurable.
+Category = Literal["billing", "technical", "account", "sales", "general"]
+CATEGORIES: tuple[str, ...] = Category.__args__
+
+
 class TriageResult(BaseModel):
     # Mirrors the strict JSON schema sent to the model: unknown keys are an error.
     model_config = ConfigDict(extra="forbid")
 
-    priority: Literal["low", "medium", "high", "urgent"]
-    category: str
+    priority: Priority = Field(
+        description=(
+            "urgent: outage, security or data-loss issue, or many users blocked; "
+            "high: one customer blocked or money taken incorrectly; "
+            "medium: degraded or needs action but not blocking; "
+            "low: questions, feedback, feature requests"
+        )
+    )
+    category: Category = Field(
+        description=(
+            "billing: charges, refunds, invoices, payments; "
+            "technical: bugs, errors, outages, integrations, API; "
+            "account: login, passwords, 2FA, SSO, profile, team members, data deletion; "
+            "sales: pricing, quotes, plans, demos, discounts; "
+            "general: anything else, including feedback and complaints about service"
+        )
+    )
     sentiment: Literal["negative", "neutral", "positive"]
-    needs_human: bool
-    summary: str
+    needs_human: bool = Field(
+        description=(
+            "true when a person must act or decide: security incidents, legal or "
+            "chargeback threats, explicit requests for a human or manager, identity "
+            "verification, refunds or deletions needing approval, urgent outages"
+        )
+    )
+    summary: str = Field(description="One sentence, under 160 characters")
 
 
 class RoutingDecision(BaseModel):

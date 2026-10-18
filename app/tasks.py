@@ -32,7 +32,7 @@ from .db import PIPELINE_STEPS, SessionLocal, StepStatus, Ticket, TicketStatus, 
 from .llm import TransientLLMError
 from .llm.pricing import usage_record
 from .logging_config import request_id_var, ticket_id_var
-from .routing import route_ticket
+from .routing import normalize_category, route_ticket
 from .schemas import TriageResult
 
 logger = get_task_logger(__name__)
@@ -90,7 +90,7 @@ def _commit_step(
 def _triage_from_ticket(ticket: Ticket) -> TriageResult:
     return TriageResult(
         priority=ticket.priority,
-        category=ticket.category,
+        category=normalize_category(ticket.category),
         sentiment=ticket.sentiment,
         needs_human=ticket.needs_human,
         summary=ticket.summary,

@@ -174,3 +174,22 @@ def test_process_ticket_ignores_unknown_ticket(scripted):
     provider = scripted()
     assert process_ticket.delay("does-not-exist").get() is None
     assert provider.calls == []
+
+
+def test_resume_with_legacy_free_text_category(db, scripted):
+    scripted()
+    ticket = _make_ticket(
+        db,
+        priority="high",
+        category="Payment issue",  # written before the category taxonomy existed
+        sentiment="negative",
+        needs_human=False,
+        summary="double charge",
+        triage_status=StepStatus.COMPLETED,
+    )
+
+    process_ticket.delay(ticket.id).get()
+
+    ticket = _reload(db, ticket)
+    assert ticket.status == TicketStatus.COMPLETED
+    assert ticket.assigned_team == "billing"
