@@ -37,6 +37,7 @@ Code map:
 | `app/llm/` | Provider interface, OpenAI/Anthropic/fake implementations, pricing |
 | `app/routing.py` | Deterministic routing rules |
 | `app/security.py`, `app/limits.py` | API-key auth, request body size limit |
+| `app/idempotency.py` | `Idempotency-Key` handling for ticket creation |
 | `app/health.py`, `app/logging_config.py` | Readiness checks, structured logging |
 | `migrations/` | Alembic schema migrations |
 | `evals/` | Labeled dataset and triage eval harness |
@@ -62,6 +63,8 @@ Code map:
 **Cost is recorded per call, not inferred later.** Every `triage_completed` and `draft_created` audit event stores the provider, the model that actually served the request, input and output tokens, latency, and an estimated USD cost from a small price table. If a model's price isn't in the table, `cost_usd` is `null` rather than a guess. `LLM_PRICE_OVERRIDES` fixes or extends prices without a deploy. The estimate prices all input tokens at the uncached rate.
 
 **Auth is simple on purpose.** Write endpoints need an `X-API-Key` that matches one of `API_KEYS`. The list is comma-separated, so keys can be rotated with an overlap. Comparison is constant-time. The audit log records a SHA-256 fingerprint of the key, never the key itself. With no keys configured, writes are refused (503) unless `AUTH_DISABLED=true`. Read endpoints are open. See Limitations.
+
+**Ingestion is idempotent when the client asks for it.** `POST /tickets` accepts an optional `Idempotency-Key` header. The key is stored in an `idempotency_keys` table together with the caller's API-key fingerprint, a SHA-256 hash of the validated request body, the ticket it created and an expiry (`IDEMPOTENCY_KEY_TTL_SECONDS`, default 24 h). The ticket, its `ticket_created` audit event and the key record are committed in one transaction, so a key never points at a ticket that doesn't exist. A retry with the same key and body returns the original ticket with `200` and `Idempotent-Replayed: true`, and doesn't enqueue it again. The same key with a different body is a `422`. Keys are scoped per API key, so two clients can't collide or read each other's tickets through a shared key. Two first requests racing with the same key are settled by a unique constraint on `(api_key, key)`: the loser's insert fails, it rolls back and returns the winner's ticket (or `422` if its body differs). The body hash is computed after validation, so key order, an explicit `null` versus an omitted optional field, and whitespace that's stripped anyway count as the same request.
 
 ## Running it
 
@@ -105,6 +108,7 @@ Environment variables take precedence over `.env`.
 | `AUTH_DISABLED` | `false` | Allow writes without a key (local experiments only) |
 | `CORS_ORIGINS` | empty | Comma-separated allowed origins; empty = same-origin only |
 | `MAX_REQUEST_BYTES` | `65536` | Request body limit (413 above it) |
+| `IDEMPOTENCY_KEY_TTL_SECONDS` | `86400` | How long an `Idempotency-Key` is remembered (24 h) |
 | `LLM_PROVIDER` | `auto` | `auto`, `openai`, `anthropic`, `fake` |
 | `OPENAI_API_KEY` | | OpenAI credentials |
 | `OPENAI_MODEL_TRIAGE`, `OPENAI_MODEL_DRAFTING` | `gpt-4o-mini` | OpenAI models per step |
@@ -130,6 +134,13 @@ KEY=your-api-key
 curl -s -X POST $API/tickets \
   -H "Content-Type: application/json" -H "X-API-Key: $KEY" -H "X-Request-ID: demo-1" \
   -d '{"subject": "Charged twice", "body": "I was billed twice for March.", "channel": "email"}'
+
+# Safe to retry: the same Idempotency-Key and body return the original ticket
+# (201 the first time, then 200 with "Idempotent-Replayed: true"); the same key
+# with a different body is a 422. Keys are per API key and expire after 24 h.
+curl -s -i -X POST $API/tickets \
+  -H "Content-Type: application/json" -H "X-API-Key: $KEY" -H "Idempotency-Key: order-1234-retry" \
+  -d '{"subject": "Charged twice", "body": "I was billed twice for March."}'
 
 # Read it back: triage, routing, draft, plus status / triage_status / routing_status /
 # drafting_status / attempts / last_error
@@ -159,7 +170,7 @@ Example audit event:
                      "output_tokens": 37, "latency_ms": 0, "cost_usd": 0.0}}}
 ```
 
-Error responses: `401` missing or invalid key, `413` body too large, `422` validation (subject 1-300 chars, body 1-20,000 chars, unknown fields rejected), `503` no API keys configured.
+Error responses: `401` missing or invalid key, `413` body too large, `422` validation (subject 1-300 chars, body 1-20,000 chars, unknown fields rejected, `Idempotency-Key` not 1-255 printable ASCII characters, or a key reused with a different body), `503` no API keys configured.
 
 Logs are JSON lines with `request_id` and `ticket_id` on every record. The request ID is either the caller's `X-Request-ID` or a generated one, it's echoed in the response, and it's passed to the worker, so one ID ties together the API and worker logs for a ticket.
 
@@ -172,7 +183,7 @@ TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/support_test \
   .venv/bin/python -m pytest                                  # same suite on Postgres
 ```
 
-123 tests cover:
+140 tests cover:
 
 - routing rules and legacy-category normalization
 - strict schema generation and validation
@@ -180,6 +191,7 @@ TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/support_test \
 - provider selection
 - the Celery task run eagerly: idempotent reruns, resuming after completed steps, transient retries, exhausted retries, fail-fast permanent errors, the concurrent-completion guard
 - the HTTP API through TestClient: auth, size limits, reprocess, enqueue failure
+- idempotency keys: replay, body mismatch, per-API-key scoping, expiry and its setting, malformed keys, and a lost insert race (both simulated and with two concurrent requests)
 - logging and health probes
 - pricing
 - migrations: models match the migrations, downgrade is clean, the `0002` backfill
@@ -224,7 +236,8 @@ I haven't published numbers for OpenAI or Anthropic because I haven't run those 
 
 - **Read endpoints and the dashboard are unauthenticated**, so anyone who can reach the API can read ticket contents. Only writes are protected. Before real deployment, put reads behind auth or a private network.
 - API keys are shared secrets from the environment. There are no per-tenant keys, no scopes, and no rate limiting.
-- Two workers running the same ticket at once can both pay for an LLM call (correctness is protected; cost isn't). There is no ingestion idempotency key, so a client that retries `POST /tickets` creates duplicates.
+- Two workers running the same ticket at once can both pay for an LLM call (correctness is protected; cost isn't).
+- `Idempotency-Key` is opt-in: a client that retries `POST /tickets` without one still creates duplicates. Keys are scoped to the API key, so a client that rotates its key between a request and its retry gets a new ticket, and with `AUTH_DISABLED=true` every caller shares one scope. Expired rows are only replaced when the same key is reused; nothing purges them in the background yet (`expires_at` is indexed so a periodic `DELETE ... WHERE expires_at < now()` is cheap). A replay returns the ticket's current state, not a byte-for-byte copy of the first response.
 - Triage is evaluated on only 34 synthetic tickets, labeled by one person. The drafting quality isn't evaluated at all.
 - The cost estimate uses a hand-maintained price table and ignores cache discounts.
 - No metrics endpoint (Prometheus/OpenTelemetry) yet. Observability is structured logs plus the audit trail.
@@ -234,7 +247,7 @@ I haven't published numbers for OpenAI or Anthropic because I haven't run those 
 ## Roadmap
 
 - Authenticate reads; per-tenant keys with scopes; rate limiting
-- `Idempotency-Key` header on ticket creation
+- Periodic purge of expired idempotency keys
 - Per-step leases so concurrent duplicates don't pay twice
 - Prometheus metrics: step latency, retries, tokens, and cost by model
 - Human approval workflow for drafts (approve/edit/send) with the audit trail
