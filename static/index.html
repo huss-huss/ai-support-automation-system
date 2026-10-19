@@ -56,6 +56,7 @@
     .detail-enter { animation: detailEnter 0.35s ease-out forwards; }
     @keyframes detailEnter { from { opacity: 0; transform: translateY(16px) scale(0.98) } to { opacity: 1; transform: translateY(0) scale(1) } }
     .toast { animation: toastIn 0.3s ease-out; }
+    #key-dialog::backdrop { background: rgba(24,24,27,0.25); backdrop-filter: blur(4px); }
     @keyframes toastIn { from { opacity: 0; transform: translateY(-10px) } to { opacity: 1; transform: translateY(0) } }
   </style>
 </head>
@@ -73,7 +74,11 @@
             <p class="text-sm text-surface-500 font-medium">Triage · Route · Draft</p>
           </div>
         </div>
-        <a href="/docs" target="_blank" class="text-sm font-medium text-surface-500 hover:text-brand-600 transition-colors">API docs</a>
+        <div class="flex items-center gap-5">
+          <button type="button" id="change-key" class="text-sm font-medium text-surface-500 hover:text-brand-600 transition-colors">Change API key</button>
+          <button type="button" id="forget-key" class="text-sm font-medium text-surface-500 hover:text-brand-600 transition-colors">Forget key</button>
+          <a href="/docs" target="_blank" class="text-sm font-medium text-surface-500 hover:text-brand-600 transition-colors">API docs</a>
+        </div>
       </div>
     </header>
 
@@ -114,12 +119,6 @@
               <option value="chat">Chat</option>
               <option value="web">Web</option>
             </select>
-          </div>
-          <div class="sm:col-span-2">
-            <label class="block text-sm font-medium text-surface-600 mb-2">API key</label>
-            <input type="password" id="api-key" autocomplete="off"
-              class="input-focus w-full rounded-xl border border-surface-200 bg-white/80 px-4 py-3 text-surface-800 placeholder-surface-400 transition-all duration-200"
-              placeholder="Required to create tickets (stored in this browser only)" />
           </div>
           <div class="sm:col-span-2 flex justify-end pt-1">
             <button type="submit" id="submit-btn"
@@ -176,6 +175,24 @@
         </div>
       </section>
       <div id="detail-backdrop" class="hidden fixed inset-0 bg-surface-900/20 backdrop-blur-sm z-30" aria-hidden="true"></div>
+
+      <!-- API key prompt. The key lives in sessionStorage: it is gone when the tab closes. -->
+      <dialog id="key-dialog" class="card rounded-2xl p-0 w-full max-w-md">
+        <form method="dialog" class="p-8 space-y-5">
+          <div>
+            <h2 class="text-lg font-semibold text-surface-900">API key</h2>
+            <p id="key-dialog-reason" class="text-sm text-surface-500 mt-1"></p>
+          </div>
+          <input type="password" id="key-dialog-input" required autocomplete="off"
+            class="input-focus w-full rounded-xl border border-surface-200 bg-white/80 px-4 py-3 text-surface-800 placeholder-surface-400 transition-all duration-200"
+            placeholder="X-API-Key value" />
+          <p class="text-xs text-surface-400">Kept for this browser tab only and sent with every request. A read-only key can view tickets; creating tickets needs a read-write key.</p>
+          <div class="flex justify-end gap-3">
+            <button type="submit" value="cancel" formnovalidate class="px-4 py-2.5 rounded-xl text-sm font-medium text-surface-600 hover:bg-surface-100 transition-colors">Cancel</button>
+            <button type="submit" value="save" class="btn-primary px-6 py-2.5 rounded-xl text-sm">Continue</button>
+          </div>
+        </form>
+      </dialog>
     </main>
   </div>
 
@@ -202,9 +219,97 @@
       return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     }
 
-    const apiKeyInput = document.getElementById('api-key');
-    apiKeyInput.value = localStorage.getItem('supportApiKey') || '';
-    apiKeyInput.addEventListener('change', () => localStorage.setItem('supportApiKey', apiKeyInput.value));
+    // --- API key handling ---------------------------------------------------
+    // The key is kept in sessionStorage (this tab only, cleared when it closes),
+    // never in localStorage. Every request sends it; a 401 asks for it again.
+    const KEY_STORAGE = 'supportApiKey';
+    localStorage.removeItem(KEY_STORAGE); // earlier versions stored the key there
+
+    class AuthCancelled extends Error {}
+
+    const keyDialog = document.getElementById('key-dialog');
+    const keyInput = document.getElementById('key-dialog-input');
+    let pendingKeyPrompt = null;
+
+    function storedKey() {
+      return sessionStorage.getItem(KEY_STORAGE) || '';
+    }
+
+    function forgetKey() {
+      sessionStorage.removeItem(KEY_STORAGE);
+    }
+
+    // Ask for a key. Concurrent callers share one dialog and get the same answer.
+    function askForKey(reason) {
+      if (pendingKeyPrompt) return pendingKeyPrompt;
+      pendingKeyPrompt = new Promise((resolve, reject) => {
+        document.getElementById('key-dialog-reason').textContent = reason;
+        keyInput.value = '';
+        keyDialog.returnValue = '';
+        keyDialog.addEventListener('close', () => {
+          const key = keyInput.value.trim();
+          keyInput.value = '';
+          pendingKeyPrompt = null;
+          if (keyDialog.returnValue === 'save' && key) {
+            sessionStorage.setItem(KEY_STORAGE, key);
+            resolve(key);
+          } else {
+            reject(new AuthCancelled('An API key is required'));
+          }
+        }, { once: true });
+        keyDialog.showModal();
+        keyInput.focus();
+      });
+      return pendingKeyPrompt;
+    }
+
+    // fetch() against the API with X-API-Key attached. Prompts when there is no
+    // key, and again (then retries) whenever the server answers 401.
+    async function apiFetch(path, options = {}) {
+      let key = storedKey() || await askForKey('Enter an API key to use the dashboard.');
+      for (;;) {
+        const r = await fetch(API + path, {
+          ...options,
+          headers: { ...(options.headers || {}), 'X-API-Key': key },
+        });
+        if (r.status !== 401) return r;
+        if (storedKey() === key) {
+          forgetKey();
+          key = await askForKey('That API key was not accepted. Enter a valid key.');
+        } else {
+          // Another request already replaced the key while this one was in flight.
+          key = storedKey() || await askForKey('That API key was not accepted. Enter a valid key.');
+        }
+      }
+    }
+
+    function keyRequiredHtml(what) {
+      return `<div class="py-12 text-center"><p class="text-surface-500 font-medium">An API key is needed to ${what}.</p>`
+        + '<button type="button" class="enter-key mt-3 text-sm font-medium text-brand-600 hover:text-brand-700">Enter API key</button></div>';
+    }
+
+    async function changeKey(reason) {
+      try {
+        await askForKey(reason);
+      } catch (err) {
+        if (!(err instanceof AuthCancelled)) throw err;
+        return;
+      }
+      loadTickets();
+      if (currentDetailId && !document.getElementById('ticket-detail').classList.contains('hidden')) {
+        loadTicketDetail(currentDetailId);
+      }
+    }
+
+    document.getElementById('change-key').addEventListener('click', () => changeKey('Enter the API key to use from now on.'));
+    document.getElementById('forget-key').addEventListener('click', () => {
+      forgetKey();
+      closeDetail();
+      document.getElementById('ticket-list').innerHTML = keyRequiredHtml('view tickets');
+    });
+    document.addEventListener('click', (e) => {
+      if (e.target.closest('.enter-key')) changeKey('Enter an API key to use the dashboard.');
+    });
 
     document.getElementById('create-form').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -212,9 +317,9 @@
       const fd = new FormData(e.target);
       btn.disabled = true;
       try {
-        const r = await fetch(API + '/tickets', {
+        const r = await apiFetch('/tickets', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKeyInput.value },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             subject: fd.get('subject'),
             body: fd.get('body'),
@@ -226,14 +331,19 @@
         if (r.ok) {
           showMessage('create-message', 'Ticket created. The worker will process it (triage → routing → draft). Open the ticket and click Refresh to see updates.');
           e.target.reset();
-          apiKeyInput.value = localStorage.getItem('supportApiKey') || '';
           loadTickets();
           setTimeout(() => { openDetail(); loadTicketDetail(data.id); }, 400);
+        } else if (r.status === 403) {
+          showMessage('create-message', 'This API key is read-only, so it cannot create tickets. Use "Change API key" to switch to a read-write key.', true);
         } else {
           showMessage('create-message', data.detail?.message || (typeof data.detail === 'string' ? data.detail : 'Failed to create ticket'), true);
         }
       } catch (err) {
-        showMessage('create-message', 'Network error: ' + err.message, true);
+        if (err instanceof AuthCancelled) {
+          showMessage('create-message', 'An API key is needed to create tickets.', true);
+        } else {
+          showMessage('create-message', 'Network error: ' + err.message, true);
+        }
       }
       btn.disabled = false;
     });
@@ -259,7 +369,8 @@
     async function loadTickets() {
       const list = document.getElementById('ticket-list');
       try {
-        const r = await fetch(API + '/tickets');
+        const r = await apiFetch('/tickets');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
         const tickets = await r.json();
         if (!tickets.length) {
           list.innerHTML = `
@@ -292,7 +403,9 @@
           });
         });
       } catch (err) {
-        list.innerHTML = '<p class="text-red-600 py-6">Could not load tickets. Is the API running?</p>';
+        list.innerHTML = err instanceof AuthCancelled
+          ? keyRequiredHtml('view tickets')
+          : '<p class="text-red-600 py-6">Could not load tickets. Is the API running?</p>';
       }
     }
 
@@ -304,8 +417,8 @@
       auditEl.innerHTML = '';
       try {
         const [tRes, aRes] = await Promise.all([
-          fetch(API + '/tickets/' + id),
-          fetch(API + '/tickets/' + id + '/audit'),
+          apiFetch('/tickets/' + encodeURIComponent(id)),
+          apiFetch('/tickets/' + encodeURIComponent(id) + '/audit'),
         ]);
         const ticket = tRes.ok ? await tRes.json() : null;
         const audit = aRes.ok ? await aRes.json() : [];
@@ -356,7 +469,9 @@
             }).join('')
           : '<p class="text-surface-500 py-3 text-sm">No audit entries yet.</p>';
       } catch (err) {
-        body.innerHTML = '<p class="text-red-600 py-8">Could not load ticket.</p>';
+        body.innerHTML = err instanceof AuthCancelled
+          ? keyRequiredHtml('view this ticket')
+          : '<p class="text-red-600 py-8">Could not load ticket.</p>';
       }
     }
 

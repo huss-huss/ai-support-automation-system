@@ -36,7 +36,7 @@ Code map:
 | `app/agents_triage.py`, `app/agents_drafting.py` | Prompt construction and output validation |
 | `app/llm/` | Provider interface, OpenAI/Anthropic/fake implementations, pricing |
 | `app/routing.py` | Deterministic routing rules |
-| `app/security.py`, `app/limits.py` | API-key auth, request body size limit |
+| `app/security.py`, `app/limits.py` | API-key auth and scopes, request body size limit |
 | `app/idempotency.py` | `Idempotency-Key` handling for ticket creation |
 | `app/health.py`, `app/logging_config.py` | Readiness checks, structured logging |
 | `migrations/` | Alembic schema migrations |
@@ -62,7 +62,18 @@ Code map:
 
 **Cost is recorded per call, not inferred later.** Every `triage_completed` and `draft_created` audit event stores the provider, the model that actually served the request, input and output tokens, latency, and an estimated USD cost from a small price table. If a model's price isn't in the table, `cost_usd` is `null` rather than a guess. `LLM_PRICE_OVERRIDES` fixes or extends prices without a deploy. The estimate prices all input tokens at the uncached rate.
 
-**Auth is simple on purpose.** Write endpoints need an `X-API-Key` that matches one of `API_KEYS`. The list is comma-separated, so keys can be rotated with an overlap. Comparison is constant-time. The audit log records a SHA-256 fingerprint of the key, never the key itself. With no keys configured, writes are refused (503) unless `AUTH_DISABLED=true`. Read endpoints are open. See Limitations.
+**Auth is simple on purpose.** Every endpoint that returns or changes ticket data needs an `X-API-Key` that matches one of `API_KEYS`. Only `/healthz`, `/readyz`, the dashboard's HTML page and the OpenAPI docs are public. The list is comma-separated, so keys can be rotated with an overlap. Each entry is either a bare `key`, the original format, which is a read-write key, or `name:key:scope` with scope `read` or `write`:
+
+| Scope | `GET /tickets`, `GET /tickets/{id}`, `GET /tickets/{id}/audit` | `POST /tickets`, `POST /tickets/{id}/reprocess` |
+|---|---|---|
+| `read` | allowed | `403` |
+| `write` (and bare keys) | allowed | allowed |
+
+A missing or unknown key is a `401` with `WWW-Authenticate: ApiKey`, and authentication runs before anything else, so an unauthenticated caller can't tell whether a ticket ID exists and a read-only key gets `403` before its body is validated. Malformed entries (`ops:secret`, an unknown scope such as `ops:secret:admin`, a repeated name or key) stop the API at start-up with an error that names the entry's position, not its secret. The name is used in log messages; it's never sent by clients. Comparison is constant-time and checks every configured key, so timing doesn't reveal which one matched. The audit log records a SHA-256 fingerprint of the key, never the key or its name. The fingerprint depends only on the secret, so changing `abc123` to `ci:abc123:write` keeps the same fingerprint and the same `Idempotency-Key` scope. With no keys configured, every ticket endpoint is refused (503) unless `AUTH_DISABLED=true`, which opens reads and writes alike. See Limitations.
+
+The dashboard asks for a key when it loads, keeps it in `sessionStorage` (this browser tab only, cleared when the tab closes; it never writes to `localStorage`, and it removes a key an older version left there), sends it with every request, and asks again whenever the API answers `401`. A read-only key can browse tickets; trying to create one shows a "read-only" message.
+
+Upgrading from a version with open reads: existing `API_KEYS` values keep working unchanged and stay read-write, but clients that read tickets without a key (scripts, monitoring that polled `GET /tickets`) now get `401` and need a key; give them a `read` one. A deployment with no `API_KEYS` and `AUTH_DISABLED=false` used to serve reads and now answers `503` everywhere except the probes.
 
 **Ingestion is idempotent when the client asks for it.** `POST /tickets` accepts an optional `Idempotency-Key` header. The key is stored in an `idempotency_keys` table together with the caller's API-key fingerprint, a SHA-256 hash of the validated request body, the ticket it created and an expiry (`IDEMPOTENCY_KEY_TTL_SECONDS`, default 24 h). The ticket, its `ticket_created` audit event and the key record are committed in one transaction, so a key never points at a ticket that doesn't exist. A retry with the same key and body returns the original ticket with `200` and `Idempotent-Replayed: true`, and doesn't enqueue it again. The same key with a different body is a `422`. Keys are scoped per API key, so two clients can't collide or read each other's tickets through a shared key. Two first requests racing with the same key are settled by a unique constraint on `(api_key, key)`: the loser's insert fails, it rolls back and returns the winner's ticket (or `422` if its body differs). The body hash is computed after validation, so key order, an explicit `null` versus an omitted optional field, and whitespace that's stripped anyway count as the same request.
 
@@ -71,12 +82,13 @@ Code map:
 ### Docker Compose
 
 ```bash
-export API_KEYS=$(openssl rand -hex 16)        # required: protects write endpoints
+export API_KEYS=$(openssl rand -hex 16)        # required: a read-write key for every ticket endpoint
+# or several keys with scopes: API_KEYS="ops:$(openssl rand -hex 16):write,viewer:$(openssl rand -hex 16):read"
 export OPENAI_API_KEY=...                       # or ANTHROPIC_API_KEY=..., or neither (fake provider)
 docker compose up --build
 ```
 
-The API runs `alembic upgrade head` before starting. The worker waits until the API is healthy. The dashboard is at http://localhost:8000 (paste the API key into the form), and Swagger is at http://localhost:8000/docs.
+The API runs `alembic upgrade head` before starting. The worker waits until the API is healthy. The dashboard is at http://localhost:8000 (it asks for an API key; a read key is enough to browse, creating tickets needs a write key), and Swagger is at http://localhost:8000/docs.
 
 ### Local (without Docker for the app)
 
@@ -104,8 +116,8 @@ Environment variables take precedence over `.env`.
 | `CELERY_BROKER_URL` | `redis://redis:6379/1` | Celery broker; `/readyz` pings it if it is Redis |
 | `CELERY_RESULT_BACKEND` | `redis://redis:6379/2` | Configured for Celery, but results are not stored |
 | `ENVIRONMENT` | `development` | `production` forbids the implicit fake provider |
-| `API_KEYS` | empty | Comma-separated keys accepted in `X-API-Key` |
-| `AUTH_DISABLED` | `false` | Allow writes without a key (local experiments only) |
+| `API_KEYS` | empty | Comma-separated keys accepted in `X-API-Key`: `key` (read-write) or `name:key:scope` with scope `read` or `write` |
+| `AUTH_DISABLED` | `false` | Allow reads and writes without a key (local experiments only) |
 | `CORS_ORIGINS` | empty | Comma-separated allowed origins; empty = same-origin only |
 | `MAX_REQUEST_BYTES` | `65536` | Request body limit (413 above it) |
 | `IDEMPOTENCY_KEY_TTL_SECONDS` | `86400` | How long an `Idempotency-Key` is remembered (24 h) |
@@ -128,7 +140,8 @@ Environment variables take precedence over `.env`.
 
 ```bash
 API=http://localhost:8000
-KEY=your-api-key
+KEY=your-api-key        # write scope: everything below
+READ_KEY=viewer-key     # read scope: GET requests only
 
 # Create a ticket (processing happens asynchronously)
 curl -s -X POST $API/tickets \
@@ -143,19 +156,24 @@ curl -s -i -X POST $API/tickets \
   -d '{"subject": "Charged twice", "body": "I was billed twice for March."}'
 
 # Read it back: triage, routing, draft, plus status / triage_status / routing_status /
-# drafting_status / attempts / last_error
-curl -s $API/tickets/<id>
+# drafting_status / attempts / last_error. Reads need a key too; read scope is enough.
+curl -s $API/tickets/<id> -H "X-API-Key: $READ_KEY"
 
 # Audit trail, including per-call tokens and estimated cost
-curl -s $API/tickets/<id>/audit
+curl -s $API/tickets/<id>/audit -H "X-API-Key: $READ_KEY"
 
 # List the 100 newest tickets
-curl -s $API/tickets
+curl -s $API/tickets -H "X-API-Key: $READ_KEY"
+
+# Without a key: 401. A read-only key on a write endpoint: 403.
+curl -s -o /dev/null -w "%{http_code}\n" $API/tickets                                  # 401
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $API/tickets -H "X-API-Key: $READ_KEY" \
+  -H "Content-Type: application/json" -d '{"subject": "s", "body": "b"}'               # 403
 
 # Re-queue a failed or never-enqueued ticket (completed steps are kept); 409 if already done
 curl -s -X POST $API/tickets/<id>/reprocess -H "X-API-Key: $KEY"
 
-# Probes
+# Probes (public, no key)
 curl -s $API/healthz    # liveness, no dependencies
 curl -s $API/readyz     # 200 when DB and Redis broker respond, otherwise 503 with per-check detail
 ```
@@ -170,7 +188,7 @@ Example audit event:
                      "output_tokens": 37, "latency_ms": 0, "cost_usd": 0.0}}}
 ```
 
-Error responses: `401` missing or invalid key, `413` body too large, `422` validation (subject 1-300 chars, body 1-20,000 chars, unknown fields rejected, `Idempotency-Key` not 1-255 printable ASCII characters, or a key reused with a different body), `503` no API keys configured.
+Error responses: `401` missing or invalid key, `403` read-only key on a write endpoint, `413` body too large, `422` validation (subject 1-300 chars, body 1-20,000 chars, unknown fields rejected, `Idempotency-Key` not 1-255 printable ASCII characters, or a key reused with a different body), `503` no API keys configured.
 
 Logs are JSON lines with `request_id` and `ticket_id` on every record. The request ID is either the caller's `X-Request-ID` or a generated one, it's echoed in the response, and it's passed to the worker, so one ID ties together the API and worker logs for a ticket.
 
@@ -183,7 +201,7 @@ TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/support_test \
   .venv/bin/python -m pytest                                  # same suite on Postgres
 ```
 
-140 tests cover:
+201 tests cover:
 
 - routing rules and legacy-category normalization
 - strict schema generation and validation
@@ -191,6 +209,7 @@ TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/support_test \
 - provider selection
 - the Celery task run eagerly: idempotent reruns, resuming after completed steps, transient retries, exhausted retries, fail-fast permanent errors, the concurrent-completion guard
 - the HTTP API through TestClient: auth, size limits, reprocess, enqueue failure
+- read authentication and scopes: every read endpoint without a key, with a wrong key, with a read key and with each kind of write key; read-only keys on every write endpoint; public probes; the OpenAPI security scheme; `API_KEYS` parsing, malformed entries and backward compatibility of bare keys; the constant-time comparison checking every key
 - idempotency keys: replay, body mismatch, per-API-key scoping, expiry and its setting, malformed keys, and a lost insert race (both simulated and with two concurrent requests)
 - logging and health probes
 - pricing
@@ -234,8 +253,9 @@ I haven't published numbers for OpenAI or Anthropic because I haven't run those 
 
 ## Limitations
 
-- **Read endpoints and the dashboard are unauthenticated**, so anyone who can reach the API can read ticket contents. Only writes are protected. Before real deployment, put reads behind auth or a private network.
-- API keys are shared secrets from the environment. There are no per-tenant keys, no scopes, and no rate limiting.
+- API keys are shared secrets from the environment. There are two scopes (`read`, `write`) but no per-tenant keys: any valid key sees every ticket. There's no rate limiting, so nothing slows down key guessing; use long random keys. Changing keys needs a restart.
+- The dashboard is a single static page. Its key sits in `sessionStorage`, which any script running on the page can read, so it relies on the page loading only its own code and the scripts it pulls from CDNs (Tailwind's CDN build, unpinned). The key travels in a header on every request, so serve the API over HTTPS outside a local machine.
+- A bare key can't contain `:` any more, because a colon now marks the `name:key:scope` format. Most such keys fail at start-up; one shaped exactly like `a:b:read` or `a:b:write` would be read as a named key with secret `b`. Keys generated with `openssl rand -hex` are unaffected.
 - Two workers running the same ticket at once can both pay for an LLM call (correctness is protected; cost isn't).
 - `Idempotency-Key` is opt-in: a client that retries `POST /tickets` without one still creates duplicates. Keys are scoped to the API key, so a client that rotates its key between a request and its retry gets a new ticket, and with `AUTH_DISABLED=true` every caller shares one scope. Expired rows are only replaced when the same key is reused; nothing purges them in the background yet (`expires_at` is indexed so a periodic `DELETE ... WHERE expires_at < now()` is cheap). A replay returns the ticket's current state, not a byte-for-byte copy of the first response.
 - Triage is evaluated on only 34 synthetic tickets, labeled by one person. The drafting quality isn't evaluated at all.
@@ -246,7 +266,7 @@ I haven't published numbers for OpenAI or Anthropic because I haven't run those 
 
 ## Roadmap
 
-- Authenticate reads; per-tenant keys with scopes; rate limiting
+- Per-tenant keys; rate limiting
 - Periodic purge of expired idempotency keys
 - Per-step leases so concurrent duplicates don't pay twice
 - Prometheus metrics: step latency, retries, tokens, and cost by model

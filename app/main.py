@@ -26,11 +26,12 @@ from .db import (
 from .limits import BodySizeLimitMiddleware
 from .logging_config import configure_logging, request_id_var, ticket_id_var
 from .schemas import AuditLogRead, TicketCreate, TicketRead
-from .security import require_api_key
+from .security import require_read_key, require_write_key, validate_api_keys
 from .tasks import process_ticket
 
 settings = get_settings()
 configure_logging(settings.log_level, settings.log_format)
+validate_api_keys()
 logger = logging.getLogger(__name__)
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -118,7 +119,7 @@ def ingest_ticket(
     payload: TicketCreate,
     response: Response,
     db: Session = Depends(get_db),
-    caller: str = Depends(require_api_key),
+    caller: str = Depends(require_write_key),
     idempotency_key: str | None = Header(
         default=None,
         alias=idempotency.HEADER,
@@ -226,7 +227,7 @@ def _enqueue(db: Session, ticket: Ticket) -> None:
 def reprocess_ticket(
     ticket_id: str,
     db: Session = Depends(get_db),
-    caller: str = Depends(require_api_key),
+    caller: str = Depends(require_write_key),
 ) -> TicketRead:
     """
     Re-queue a ticket that failed or never got processed. Completed steps are
@@ -255,13 +256,16 @@ def reprocess_ticket(
     return TicketRead.model_validate(ticket)
 
 
-@app.get("/tickets", response_model=list[TicketRead])
+# Every endpoint returning ticket data needs at least a read-scoped key.
+@app.get("/tickets", response_model=list[TicketRead], dependencies=[Depends(require_read_key)])
 def list_tickets(db: Session = Depends(get_db)) -> list[TicketRead]:
     tickets = db.query(Ticket).order_by(Ticket.created_at.desc()).limit(100).all()
     return [TicketRead.model_validate(t) for t in tickets]
 
 
-@app.get("/tickets/{ticket_id}", response_model=TicketRead)
+@app.get(
+    "/tickets/{ticket_id}", response_model=TicketRead, dependencies=[Depends(require_read_key)]
+)
 def get_ticket(ticket_id: str, db: Session = Depends(get_db)) -> TicketRead:
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
@@ -269,7 +273,11 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db)) -> TicketRead:
     return TicketRead.model_validate(ticket)
 
 
-@app.get("/tickets/{ticket_id}/audit", response_model=list[AuditLogRead])
+@app.get(
+    "/tickets/{ticket_id}/audit",
+    response_model=list[AuditLogRead],
+    dependencies=[Depends(require_read_key)],
+)
 def get_ticket_audit(ticket_id: str, db: Session = Depends(get_db)) -> list[AuditLogRead]:
     logs = db.query(AuditLog).filter(AuditLog.ticket_id == ticket_id).order_by(
         AuditLog.created_at

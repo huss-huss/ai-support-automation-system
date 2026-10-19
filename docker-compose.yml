@@ -7,7 +7,7 @@ x-app-env: &app-env
   LLM_PROVIDER: ${LLM_PROVIDER:-auto}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-  API_KEYS: ${API_KEYS:?set API_KEYS (comma-separated) to protect write endpoints}
+  API_KEYS: ${API_KEYS:?set API_KEYS (comma-separated) to protect the ticket endpoints}
   LOG_FORMAT: ${LOG_FORMAT:-json}
 
 services:
