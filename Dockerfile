@@ -20,7 +20,8 @@ COPY app ./app
 COPY static ./static
 COPY docs ./docs
 
-EXPOSE 8000
+# 8000: API (incl. /metrics); 9101: the Celery worker's metrics server
+EXPOSE 8000 9101
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
