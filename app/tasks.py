@@ -14,15 +14,22 @@ Reliability model
   retried by Celery with exponential backoff and jitter. Permanent errors fail
   fast. Either way, when the task finally gives up, on_failure marks the
   ticket and the step that was running as failed.
+
+Each step run is timed into a Prometheus histogram labelled with its outcome,
+and every successful LLM call adds to call, token and cost counters (see
+app.metrics).
 """
 
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.utils.log import get_task_logger
 from sqlalchemy.orm import Session
 
+from . import metrics as m
 from .agents_drafting import run_drafting_agent
 from .agents_triage import run_triage_agent
 from .audit import add_audit_log
@@ -45,8 +52,9 @@ def _get_db() -> Session:
     return SessionLocal()
 
 
-def _usage(usage) -> dict:
+def _usage(usage, purpose: str) -> dict:
     record = usage_record(usage, settings.llm_price_overrides)
+    m.record_llm_usage(record, purpose)
     logger.info(
         "LLM call: provider=%s model=%s in=%s out=%s cost_usd=%s latency_ms=%s",
         record["provider"], record["model"], record["input_tokens"],
@@ -64,6 +72,32 @@ def _current_step(ticket: Ticket) -> str | None:
         (s for s in PIPELINE_STEPS if getattr(ticket, f"{s}_status") != StepStatus.COMPLETED),
         None,
     )
+
+
+class _StepRun:
+    outcome = "completed"
+
+
+@contextmanager
+def _observe_step(step: str) -> Iterator[_StepRun]:
+    """
+    Time one step run. The outcome is "completed" unless the body marks it
+    "discarded" (a concurrent run committed first) or raises.
+    """
+    run = _StepRun()
+    started = time.perf_counter()
+    try:
+        yield run
+    except RETRYABLE_ERRORS:
+        run.outcome = "transient_error"
+        raise
+    except BaseException:
+        run.outcome = "error"
+        raise
+    finally:
+        m.STEP_DURATION.labels(step=step, outcome=run.outcome).observe(
+            time.perf_counter() - started
+        )
 
 
 def _commit_step(
@@ -102,62 +136,69 @@ def _run_pipeline(db: Session, ticket: Ticket) -> None:
 
     # Triage
     if ticket.triage_status != StepStatus.COMPLETED:
-        triage, usage = run_triage_agent(
-            {
-                "subject": ticket.subject,
-                "body": ticket.body,
-                "customer_id": ticket.customer_id,
-                "channel": ticket.channel,
-            }
-        )
+        with _observe_step("triage") as run:
+            triage, usage = run_triage_agent(
+                {
+                    "subject": ticket.subject,
+                    "body": ticket.body,
+                    "customer_id": ticket.customer_id,
+                    "channel": ticket.channel,
+                }
+            )
 
-        def apply_triage(t: Ticket) -> None:
-            t.priority = triage.priority
-            t.category = triage.category
-            t.sentiment = triage.sentiment
-            t.needs_human = triage.needs_human
-            t.summary = triage.summary
+            def apply_triage(t: Ticket) -> None:
+                t.priority = triage.priority
+                t.category = triage.category
+                t.sentiment = triage.sentiment
+                t.needs_human = triage.needs_human
+                t.summary = triage.summary
 
-        _commit_step(
-            db,
-            ticket_id,
-            "triage",
-            apply_triage,
-            "triage_completed",
-            {**triage.model_dump(), "llm": _usage(usage)},
-        )
+            if not _commit_step(
+                db,
+                ticket_id,
+                "triage",
+                apply_triage,
+                "triage_completed",
+                {**triage.model_dump(), "llm": _usage(usage, "triage")},
+            ):
+                run.outcome = "discarded"
     ticket = db.get(Ticket, ticket_id)
     triage = _triage_from_ticket(ticket)
 
     # Routing (pure rules, no external calls)
     if ticket.routing_status != StepStatus.COMPLETED:
-        decision = route_ticket(triage=triage)
+        with _observe_step("routing") as run:
+            decision = route_ticket(triage=triage)
 
-        def apply_routing(t: Ticket) -> None:
-            t.assigned_team = decision.assigned_team
-            t.assigned_agent = decision.assigned_agent
-            t.sla_bucket = decision.sla_bucket
+            def apply_routing(t: Ticket) -> None:
+                t.assigned_team = decision.assigned_team
+                t.assigned_agent = decision.assigned_agent
+                t.sla_bucket = decision.sla_bucket
 
-        _commit_step(
-            db, ticket_id, "routing", apply_routing, "routing_completed", decision.model_dump()
-        )
+            if not _commit_step(
+                db, ticket_id, "routing", apply_routing, "routing_completed",
+                decision.model_dump(),
+            ):
+                run.outcome = "discarded"
 
     # Drafting
     ticket = db.get(Ticket, ticket_id)
     if ticket.drafting_status != StepStatus.COMPLETED:
-        draft, usage = run_drafting_agent(ticket_body=ticket.body, triage=triage)
+        with _observe_step("drafting") as run:
+            draft, usage = run_drafting_agent(ticket_body=ticket.body, triage=triage)
 
-        def apply_draft(t: Ticket) -> None:
-            t.draft_reply = draft.draft_reply
+            def apply_draft(t: Ticket) -> None:
+                t.draft_reply = draft.draft_reply
 
-        _commit_step(
-            db,
-            ticket_id,
-            "drafting",
-            apply_draft,
-            "draft_created",
-            {"length": len(draft.draft_reply or ""), "llm": _usage(usage)},
-        )
+            if not _commit_step(
+                db,
+                ticket_id,
+                "drafting",
+                apply_draft,
+                "draft_created",
+                {"length": len(draft.draft_reply or ""), "llm": _usage(usage, "drafting")},
+            ):
+                run.outcome = "discarded"
 
 
 class ProcessTicketTask(Task):
@@ -187,6 +228,7 @@ def mark_ticket_failed(ticket_id: str, exc: BaseException, *, attempt: int) -> N
             commit=False,
         )
         db.commit()
+        m.TICKETS_PROCESSED.labels(outcome="failed").inc()
     finally:
         db.close()
 
@@ -219,6 +261,7 @@ def process_ticket(self: Task, ticket_id: str, request_id: str | None = None) ->
             return None
         if ticket.status == TicketStatus.COMPLETED:
             logger.info("Ticket %s already processed; skipping", ticket_id)
+            m.TICKETS_PROCESSED.labels(outcome="already_completed").inc()
             return ticket.status
 
         ticket.status = TicketStatus.PROCESSING
@@ -236,18 +279,18 @@ def process_ticket(self: Task, ticket_id: str, request_id: str | None = None) ->
             )
             if will_retry:
                 ticket = db.get(Ticket, ticket_id)
+                step = _current_step(ticket)
                 ticket.status = TicketStatus.RETRYING
                 ticket.last_error = f"{type(exc).__name__}: {exc}"[:2000]
                 add_audit_log(
                     db,
                     ticket_id=ticket_id,
                     event_type="step_retry_scheduled",
-                    payload=_error_payload(
-                        exc, step=_current_step(ticket), attempt=self.request.retries + 1
-                    ),
+                    payload=_error_payload(exc, step=step, attempt=self.request.retries + 1),
                     commit=False,
                 )
                 db.commit()
+                m.PIPELINE_RETRIES.labels(step=step or "none").inc()
             raise
         except Exception:
             db.rollback()
@@ -258,6 +301,7 @@ def process_ticket(self: Task, ticket_id: str, request_id: str | None = None) ->
         ticket.processed_at = utcnow()
         ticket.last_error = None
         db.commit()
+        m.TICKETS_PROCESSED.labels(outcome="completed").inc()
         logger.info("Processing completed for ticket %s", ticket_id)
         return ticket.status
     finally:

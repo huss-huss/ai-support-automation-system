@@ -1,10 +1,13 @@
+import logging
+
 from celery import Celery
-from celery.signals import setup_logging
+from celery.signals import setup_logging, worker_ready
 
 from .config import get_settings
 from .logging_config import configure_logging
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 celery_app = Celery(
     "support_automation",
@@ -50,6 +53,32 @@ if settings.celery_broker_url.startswith(("redis://", "rediss://")):
 def _configure_worker_logging(**_kwargs) -> None:
     # Connecting this signal stops Celery from installing its own root handler.
     configure_logging(settings.log_level, settings.log_format)
+
+
+@worker_ready.connect
+def _start_metrics_server(**_kwargs) -> None:
+    # Runs once in the worker's main process (never in pool children, and not
+    # in eager mode), after logging is configured so problems are visible.
+    from . import metrics
+    from .security import validate_metrics_settings
+
+    if not settings.metrics_enabled or not settings.worker_metrics_port:
+        return
+    try:
+        validate_metrics_settings()
+        server = metrics.start_worker_metrics_server(
+            settings.worker_metrics_addr, settings.worker_metrics_port
+        )
+    except (ValueError, OSError):
+        # Signal handlers can't stop the worker; fail closed (no metrics) and say why.
+        logger.exception("Worker metrics server not started")
+        return
+    if not metrics.multiprocess_enabled():
+        logger.warning(
+            "PROMETHEUS_MULTIPROC_DIR is not set: metrics recorded in prefork pool "
+            "child processes will be missing (fine with --pool=solo or threads)"
+        )
+    logger.info("Worker metrics on http://%s:%s/metrics", *server.server_address[:2])
 
 
 # So the worker discovers process_ticket and any other tasks in app.tasks
