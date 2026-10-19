@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
@@ -7,6 +9,68 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # .env in the project root is read as a fallback. Real environment variables win,
 # so tests, CI and containers can override anything without editing the file.
 _env_path = Path(__file__).resolve().parent.parent / ".env"
+
+
+class Scope(StrEnum):
+    """What an API key may do. ``write`` includes everything ``read`` allows."""
+
+    READ = "read"
+    WRITE = "write"
+
+
+@dataclass(frozen=True)
+class ApiKey:
+    name: str
+    secret: str
+    scope: Scope
+
+    def allows(self, required: Scope) -> bool:
+        return self.scope == Scope.WRITE or required == Scope.READ
+
+    def __repr__(self) -> str:  # never show the secret in logs or tracebacks
+        return f"ApiKey(name={self.name!r}, scope={self.scope.value!r})"
+
+
+def parse_api_keys(raw: str) -> list[ApiKey]:
+    """
+    Parse API_KEYS. Entries are comma-separated and each is either
+
+    - ``key``: the original format; a read-write key, or
+    - ``name:key:scope`` with scope ``read`` or ``write``.
+
+    Anything else containing a colon is rejected rather than guessed at, so a
+    typo such as ``ops:secret`` or ``ops:secret:raed`` fails at start-up
+    instead of silently creating a key nobody can use. Error messages name the
+    entry by position or name, never by its secret.
+    """
+    keys: list[ApiKey] = []
+    for position, entry in enumerate(raw.split(","), start=1):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            keys.append(ApiKey(name=f"unnamed-{position}", secret=entry, scope=Scope.WRITE))
+            continue
+        parts = [p.strip() for p in entry.split(":")]
+        if len(parts) != 3 or not parts[0] or not parts[1]:
+            raise ValueError(
+                f"API_KEYS entry {position} must be 'key' or 'name:key:scope'"
+            )
+        name, secret, scope = parts
+        if scope not in Scope.__members__.values():
+            raise ValueError(
+                f"API_KEYS entry {position} ({name!r}) has unknown scope {scope!r}; "
+                f"use one of: {', '.join(s.value for s in Scope)}"
+            )
+        keys.append(ApiKey(name=name, secret=secret, scope=Scope(scope)))
+
+    names = [k.name for k in keys if not k.name.startswith("unnamed-")]
+    if len(set(names)) != len(names):
+        raise ValueError("API_KEYS contains a duplicate key name")
+    secrets = [k.secret for k in keys]
+    if len(set(secrets)) != len(secrets):
+        raise ValueError("API_KEYS contains the same key twice")
+    return keys
 
 
 class Settings(BaseSettings):
@@ -23,7 +87,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "json"  # "json" | "text"
 
-    # Write endpoints require X-API-Key matching one of these (comma-separated).
+    # Every ticket endpoint requires X-API-Key matching one of these. Comma-
+    # separated; each entry is "key" (read-write) or "name:key:scope" with
+    # scope "read" or "write". See parse_api_keys.
     api_keys: str = ""
     auth_disabled: bool = False
     # Browser origins allowed to call the API cross-origin (comma-separated).
@@ -71,8 +137,8 @@ class Settings(BaseSettings):
     llm_price_overrides: dict[str, tuple[float, float]] = {}
 
     @property
-    def api_key_list(self) -> list[str]:
-        return [k.strip() for k in self.api_keys.split(",") if k.strip()]
+    def api_key_list(self) -> list[ApiKey]:
+        return parse_api_keys(self.api_keys)
 
     @property
     def cors_origin_list(self) -> list[str]:
