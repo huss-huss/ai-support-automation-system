@@ -15,7 +15,8 @@ Support queues mix outages, billing errors, legal threats and "how do I change m
   client ──POST /tickets──▶ FastAPI ──commit──────▶│ PostgreSQL               │
   dashboard ◀─GET /tickets── (app.main)            │  tickets (+ step status) │
                   │   ▲                            │  audit_logs (JSONB)      │
-                  │   └── /healthz /readyz         └──────────▲───────────────┘
+                  │   ├── /healthz /readyz         └──────────▲───────────────┘
+                  │   └── /metrics (Prometheus)               │
                   │ enqueue(ticket_id, request_id)            │ one transaction per step
                   ▼                                           │
                Redis ───────────▶ Celery worker: process_ticket(ticket_id)
@@ -25,6 +26,7 @@ Support queues mix outages, billing errors, legal threats and "how do I change m
                                    ├─ 2. routing  ──▶ rules: category -> team, priority -> SLA
                                    └─ 3. drafting ──▶ LLMProvider (free text)
                                    retries: transient LLM errors, exponential backoff + jitter
+                                   :9101/metrics (worker's own metrics server)
 ```
 
 Code map:
@@ -39,6 +41,8 @@ Code map:
 | `app/security.py`, `app/limits.py` | API-key auth and scopes, request body size limit |
 | `app/idempotency.py` | `Idempotency-Key` handling for ticket creation |
 | `app/health.py`, `app/logging_config.py` | Readiness checks, structured logging |
+| `app/metrics.py` | Prometheus metrics, label hygiene, the worker's metrics server |
+| `deploy/prometheus/` | Prometheus scrape config for the compose `monitoring` profile |
 | `migrations/` | Alembic schema migrations |
 | `evals/` | Labeled dataset and triage eval harness |
 
@@ -62,7 +66,7 @@ Code map:
 
 **Cost is recorded per call, not inferred later.** Every `triage_completed` and `draft_created` audit event stores the provider, the model that actually served the request, input and output tokens, latency, and an estimated USD cost from a small price table. If a model's price isn't in the table, `cost_usd` is `null` rather than a guess. `LLM_PRICE_OVERRIDES` fixes or extends prices without a deploy. The estimate prices all input tokens at the uncached rate.
 
-**Auth is simple on purpose.** Every endpoint that returns or changes ticket data needs an `X-API-Key` that matches one of `API_KEYS`. Only `/healthz`, `/readyz`, the dashboard's HTML page and the OpenAPI docs are public. The list is comma-separated, so keys can be rotated with an overlap. Each entry is either a bare `key`, the original format, which is a read-write key, or `name:key:scope` with scope `read` or `write`:
+**Auth is simple on purpose.** Every endpoint that returns or changes ticket data needs an `X-API-Key` that matches one of `API_KEYS`. Only `/healthz`, `/readyz`, the dashboard's HTML page and the OpenAPI docs are public. `/metrics` takes a read key by default and can use a separate token instead; see Observability. The list is comma-separated, so keys can be rotated with an overlap. Each entry is either a bare `key`, the original format, which is a read-write key, or `name:key:scope` with scope `read` or `write`:
 
 | Scope | `GET /tickets`, `GET /tickets/{id}`, `GET /tickets/{id}/audit` | `POST /tickets`, `POST /tickets/{id}/reprocess` |
 |---|---|---|
@@ -89,6 +93,13 @@ docker compose up --build
 ```
 
 The API runs `alembic upgrade head` before starting. The worker waits until the API is healthy. The dashboard is at http://localhost:8000 (it asks for an API key; a read key is enough to browse, creating tickets needs a write key), and Swagger is at http://localhost:8000/docs.
+
+To also run Prometheus, scraping the API and the worker with a dedicated token:
+
+```bash
+export METRICS_TOKEN=$(openssl rand -hex 32)
+docker compose --profile monitoring up --build   # Prometheus at http://127.0.0.1:9090
+```
 
 ### Local (without Docker for the app)
 
@@ -135,6 +146,11 @@ Environment variables take precedence over `.env`.
 | `TASK_RETRY_BACKOFF_SECONDS` / `TASK_RETRY_BACKOFF_MAX_SECONDS` | `2` / `300` | Backoff factor and cap |
 | `TASK_SOFT_TIME_LIMIT_SECONDS` / `TASK_TIME_LIMIT_SECONDS` | `120` / `150` | Per-task time limits |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | `LOG_FORMAT=text` for terminals |
+| `METRICS_ENABLED` | `true` | Serve `/metrics` (API) and start the worker's metrics server |
+| `METRICS_TOKEN` | empty | When set (16+ chars), metrics need `Authorization: Bearer <token>` instead of an API key |
+| `METRICS_PUBLIC` | `false` | Serve metrics without credentials; only on a private network. Can't be combined with `METRICS_TOKEN` |
+| `WORKER_METRICS_PORT` / `WORKER_METRICS_ADDR` | `9101` / `127.0.0.1` | Worker metrics server; port `0` disables it. Compose binds `0.0.0.0` without publishing the port |
+| `PROMETHEUS_MULTIPROC_DIR` | unset | Empty, process-private directory for prometheus_client's multiprocess mode. Needed by the worker with the prefork pool, and by the API with `uvicorn --workers N` |
 
 ## API
 
@@ -192,6 +208,54 @@ Error responses: `401` missing or invalid key, `403` read-only key on a write en
 
 Logs are JSON lines with `request_id` and `ticket_id` on every record. The request ID is either the caller's `X-Request-ID` or a generated one, it's echoed in the response, and it's passed to the worker, so one ID ties together the API and worker logs for a ticket.
 
+## Observability
+
+Logs are JSON lines with `request_id` and `ticket_id` on every record (see API above), the audit trail records every step and LLM call, and both processes expose Prometheus metrics.
+
+**Two processes, two scrape targets.** The API serves `GET /metrics` on its own port. The Celery worker is a different process (a different container in compose), so it runs a small metrics server of its own on `WORKER_METRICS_PORT` (9101), started from the `worker_ready` signal in the worker's main process. Prometheus scrapes both and adds them up; `deploy/prometheus/prometheus.yml` has one job for each.
+
+The worker's default prefork pool runs tasks in child processes, and a counter a child increments is invisible to the parent. So the worker container sets `PROMETHEUS_MULTIPROC_DIR` to a tmpfs directory: every process writes its samples to files there and the worker's metrics server merges them on each scrape (prometheus_client's multiprocess mode). I chose a per-service server over one shared multiprocess directory read by the API for three reasons. The API and the worker are separate containers, so a shared directory would need a shared volume, and the files are named by PID, so two containers' processes with the same low PID would write into the same file. A worker on another host couldn't share it at all. And a scrape of the API shouldn't fail or slow down because of worker files. The cost is a second scrape target and a second port to keep off the internet. The tmpfs mount is private to the worker container and empty on every start, which multiprocess mode needs. Only counters and histograms are used, because multiprocess gauges would need clean-up when pool processes exit. The API runs as a single uvicorn process, so it needs none of this; with `uvicorn --workers N`, give it its own `PROMETHEUS_MULTIPROC_DIR` and `/metrics` merges its workers the same way.
+
+**Access.** Metrics reveal traffic, error rates and spend, so `/metrics` is not public by default. The rules, applied the same way by the API and the worker's server:
+
+| Setting | What a scrape needs |
+|---|---|
+| default | a read-scoped `X-API-Key` (or a write key), exactly like `GET /tickets`; `503` with no `API_KEYS`, open with `AUTH_DISABLED=true` |
+| `METRICS_TOKEN=<16+ chars>` | `Authorization: Bearer <token>`; API keys are not accepted, and the token can't read tickets. This is what Prometheus sends (`authorization.credentials_file`) |
+| `METRICS_PUBLIC=true` | nothing; for a private network where the port isn't reachable from outside. Only `/metrics` opens; tickets still need a key |
+| `METRICS_ENABLED=false` | `/metrics` is `404` and the worker starts no server |
+
+Setting both `METRICS_TOKEN` and `METRICS_PUBLIC` stops the API at start-up (the worker logs the error and serves no metrics). The worker's server binds to `127.0.0.1` unless `WORKER_METRICS_ADDR` says otherwise; compose binds `0.0.0.0` inside the container and doesn't publish 9101, and Prometheus itself is published on `127.0.0.1` only. `/metrics` is left out of the OpenAPI schema.
+
+**Labels stay low-cardinality.** HTTP metrics use the route template (`/tickets/{ticket_id}`), never the raw path; requests that match no route are `route="unmatched"`, and unusual methods are `method="other"`. Step, outcome and result labels come from closed sets. Provider and model names are checked against a conservative pattern and capped at 25 distinct values per label per process; anything beyond that is `other`. No ticket ID, request ID, key or customer text is ever a label value, and the tests check that.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `support_http_requests_total` | counter | `method`, `route`, `status` | API requests |
+| `support_http_request_duration_seconds` | histogram | `method`, `route` | API latency |
+| `support_tickets_ingested_total` | counter | `result`: `created`, `replayed`, `conflict` | `POST /tickets` outcomes, including `Idempotency-Key` replays and key-reused-with-another-body rejections |
+| `support_ticket_enqueue_failures_total` | counter | | Tickets saved but not queued (broker down) |
+| `support_pipeline_step_duration_seconds` | histogram | `step`: `triage`, `routing`, `drafting`; `outcome`: `completed`, `discarded`, `transient_error`, `error` | One run of one step. `discarded`: a concurrent run committed the step first |
+| `support_pipeline_retries_total` | counter | `step` | Celery retries scheduled after a transient failure |
+| `support_tickets_processed_total` | counter | `outcome`: `completed`, `failed`, `already_completed` | Task runs that finished a ticket, gave up on it, or found it already done (redelivery) |
+| `support_llm_calls_total` | counter | `provider`, `model`, `purpose` | Successful LLM calls |
+| `support_llm_tokens_total` | counter | `provider`, `model`, `purpose`, `kind`: `input`, `output` | Tokens |
+| `support_llm_cost_usd_total` | counter | `provider`, `model`, `purpose` | Estimated cost, same price table as the audit log |
+| `support_llm_unpriced_calls_total` | counter | `provider`, `model` | Calls whose model has no price, so they add nothing to the cost |
+| `support_llm_call_duration_seconds` | histogram | `provider`, `model`, `purpose` | LLM latency as measured by the provider wrapper |
+
+The API process also exports prometheus_client's default process and Python metrics. Some useful queries:
+
+```promql
+# p95 duration of each step over 5 minutes
+histogram_quantile(0.95, sum by (le, step) (rate(support_pipeline_step_duration_seconds_bucket[5m])))
+# Estimated spend per model over the last day
+sum by (model) (increase(support_llm_cost_usd_total[1d]))
+# Share of step runs hitting transient errors
+sum by (step) (rate(support_pipeline_step_duration_seconds_count{outcome="transient_error"}[15m]))
+  / sum by (step) (rate(support_pipeline_step_duration_seconds_count[15m]))
+```
+
 ## Tests
 
 ```bash
@@ -201,7 +265,7 @@ TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/support_test \
   .venv/bin/python -m pytest                                  # same suite on Postgres
 ```
 
-201 tests cover:
+226 tests cover:
 
 - routing rules and legacy-category normalization
 - strict schema generation and validation
@@ -212,6 +276,7 @@ TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/support_test \
 - read authentication and scopes: every read endpoint without a key, with a wrong key, with a read key and with each kind of write key; read-only keys on every write endpoint; public probes; the OpenAPI security scheme; `API_KEYS` parsing, malformed entries and backward compatibility of bare keys; the constant-time comparison checking every key
 - idempotency keys: replay, body mismatch, per-API-key scoping, expiry and its setting, malformed keys, and a lost insert race (both simulated and with two concurrent requests)
 - logging and health probes
+- metrics: tickets processed by the eager task move step, retry, outcome, token and cost series (including retries, exhausted retries, permanent errors, a step lost to a concurrent run, replays and enqueue failures); route templates instead of raw paths, no ticket IDs in any series, closed label sets and the provider/model cap; `/metrics` auth in every mode on both the API and the worker's server; and samples from forked processes merged in multiprocess mode
 - pricing
 - migrations: models match the migrations, downgrade is clean, the `0002` backfill
 - the eval harness
@@ -260,8 +325,9 @@ I haven't published numbers for OpenAI or Anthropic because I haven't run those 
 - `Idempotency-Key` is opt-in: a client that retries `POST /tickets` without one still creates duplicates. Keys are scoped to the API key, so a client that rotates its key between a request and its retry gets a new ticket, and with `AUTH_DISABLED=true` every caller shares one scope. Expired rows are only replaced when the same key is reused; nothing purges them in the background yet (`expires_at` is indexed so a periodic `DELETE ... WHERE expires_at < now()` is cheap). A replay returns the ticket's current state, not a byte-for-byte copy of the first response.
 - Triage is evaluated on only 34 synthetic tickets, labeled by one person. The drafting quality isn't evaluated at all.
 - The cost estimate uses a hand-maintained price table and ignores cache discounts.
-- No metrics endpoint (Prometheus/OpenTelemetry) yet. Observability is structured logs plus the audit trail.
-- I couldn't run Docker Compose in the environment where this was built. The compose file was checked with `docker compose config`, and the app and worker were run end to end with a real Celery worker, using Postgres as both the database and (through kombu's SQLAlchemy transport) the broker. Redis-specific behaviour is covered by unit tests with a stubbed client.
+- Metrics are Prometheus only (no OpenTelemetry traces), and there are no alerting rules or dashboards in the repository. Counters start from zero when a process restarts, as usual for Prometheus; use `rate()` / `increase()`. Failed LLM calls report no usage, so they appear as `transient_error` / `error` step outcomes rather than in the LLM counters. When two runs race on a step, both calls are counted, because both were paid for. The cost metric has the same caveats as the audit log's estimate.
+- The scrape config targets one worker by name. Several worker containers each serve their own metrics and would need DNS service discovery in `prometheus.yml`. Multiprocess mode writes one file per pool process, so with `--max-tasks-per-child` the directory grows until the worker restarts.
+- I couldn't run Docker Compose in the environment where this was built. The compose file was checked with `docker compose config`, and the app and worker were run end to end with a real Celery worker, using Postgres as both the database and (through kombu's SQLAlchemy transport) the broker. Redis-specific behaviour is covered by unit tests with a stubbed client. The Prometheus service and its scrape config have only been checked with `docker compose config`; the worker's metrics server was checked against a real worker (solo pool, multiprocess mode on), and the merge across forked pool processes by a test.
 - `docs/` contains the original planning notes (SRS, deployment sketch). They describe intentions, such as a Next.js frontend, that this repository doesn't implement.
 
 ## Roadmap
@@ -269,7 +335,6 @@ I haven't published numbers for OpenAI or Anthropic because I haven't run those 
 - Per-tenant keys; rate limiting
 - Periodic purge of expired idempotency keys
 - Per-step leases so concurrent duplicates don't pay twice
-- Prometheus metrics: step latency, retries, tokens, and cost by model
 - Human approval workflow for drafts (approve/edit/send) with the audit trail
 - Larger eval set with inter-annotator agreement, and a drafting rubric graded by people or an LLM judge
 - Webhook/email ingestion
