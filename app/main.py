@@ -4,15 +4,25 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import health as health_checks
+from . import idempotency
 from .audit import add_audit_log
 from .config import HealthStatus, get_settings
-from .db import PIPELINE_STEPS, AuditLog, SessionLocal, StepStatus, Ticket, TicketStatus
+from .db import (
+    PIPELINE_STEPS,
+    AuditLog,
+    IdempotencyKey,
+    SessionLocal,
+    StepStatus,
+    Ticket,
+    TicketStatus,
+)
 from .limits import BodySizeLimitMiddleware
 from .logging_config import configure_logging, request_id_var, ticket_id_var
 from .schemas import AuditLogRead, TicketCreate, TicketRead
@@ -47,8 +57,8 @@ if settings.cors_origin_list:
         allow_origins=settings.cors_origin_list,
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "X-API-Key", "X-Request-ID"],
-        expose_headers=["X-Request-ID"],
+        allow_headers=["Content-Type", "X-API-Key", "X-Request-ID", idempotency.HEADER],
+        expose_headers=["X-Request-ID", idempotency.REPLAYED_HEADER],
     )
 
 
@@ -95,12 +105,63 @@ def ready() -> JSONResponse:
     )
 
 
-@app.post("/tickets", response_model=TicketRead, status_code=201)
+@app.post(
+    "/tickets",
+    response_model=TicketRead,
+    status_code=201,
+    responses={
+        200: {"description": "Replay of an earlier request with the same Idempotency-Key"},
+        422: {"description": "Validation error, or Idempotency-Key reused with another body"},
+    },
+)
 def ingest_ticket(
     payload: TicketCreate,
+    response: Response,
     db: Session = Depends(get_db),
     caller: str = Depends(require_api_key),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias=idempotency.HEADER,
+        min_length=1,
+        max_length=idempotency.MAX_KEY_CHARS,
+        pattern=idempotency.KEY_PATTERN,
+        description="Optional client key; a retry with the same key and body "
+        "returns the original ticket instead of creating a duplicate",
+    ),
 ) -> TicketRead:
+    if idempotency_key is None:
+        ticket = _create_ticket(db, payload, caller)
+    else:
+        body_hash = idempotency.request_hash(payload)
+        existing = idempotency.find_active(db, caller, idempotency_key)
+        if existing is not None:
+            return _replay(existing, body_hash, response)
+        try:
+            ticket = _create_ticket(
+                db, payload, caller, idempotency_key=idempotency_key, body_hash=body_hash
+            )
+        except IntegrityError:
+            # A concurrent request with the same key committed first. Return
+            # its ticket; it has already been enqueued by that request.
+            db.rollback()
+            winner = idempotency.find_active(db, caller, idempotency_key)
+            if winner is None:
+                raise
+            return _replay(winner, body_hash, response)
+
+    _enqueue(db, ticket)
+    return TicketRead.model_validate(ticket)
+
+
+def _create_ticket(
+    db: Session,
+    payload: TicketCreate,
+    caller: str,
+    *,
+    idempotency_key: str | None = None,
+    body_hash: str | None = None,
+) -> Ticket:
+    """Insert the ticket, its creation audit event and its idempotency record together."""
     ticket = Ticket(
         subject=payload.subject,
         body=payload.body,
@@ -109,18 +170,36 @@ def ingest_ticket(
     )
     db.add(ticket)
     db.flush()
+    audit = {"api_key": caller, "request_id": request_id_var.get()}
+    if idempotency_key is not None:
+        audit["idempotency_key"] = idempotency_key
+        idempotency.record(
+            db, api_key=caller, key=idempotency_key, body_hash=body_hash, ticket_id=ticket.id
+        )
     add_audit_log(
         db,
         ticket_id=ticket.id,
         event_type="ticket_created",
-        payload={"api_key": caller, "request_id": request_id_var.get()},
+        payload=audit,
         commit=False,
     )
     db.commit()
     db.refresh(ticket)
+    return ticket
 
-    _enqueue(db, ticket)
-    return TicketRead.model_validate(ticket)
+
+def _replay(record: IdempotencyKey, body_hash: str, response: Response) -> TicketRead:
+    """Return the ticket an earlier request created, or 422 if the body differs."""
+    if record.request_hash != body_hash:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{idempotency.HEADER} was already used with a different request body",
+        )
+    ticket_id_var.set(record.ticket_id)
+    logger.info("Replaying ticket creation for idempotency key")
+    response.status_code = 200
+    response.headers[idempotency.REPLAYED_HEADER] = "true"
+    return TicketRead.model_validate(record.ticket)
 
 
 def _enqueue(db: Session, ticket: Ticket) -> None:

@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -116,3 +117,28 @@ class AuditLog(Base):
 
     ticket = relationship("Ticket", back_populates="audit_logs")
 
+
+
+class IdempotencyKey(Base):
+    """
+    A client-supplied ``Idempotency-Key`` for ``POST /tickets``, scoped to the
+    API key that sent it. The unique constraint is what makes concurrent first
+    requests safe: only one insert can win, the other replays the winner.
+    """
+
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        UniqueConstraint("api_key", "key", name="uq_idempotency_keys_api_key_key"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Fingerprint of the caller's API key (never the key itself).
+    api_key = Column(String, nullable=False)
+    key = Column(String(255), nullable=False)
+    # SHA-256 of the canonicalised request body.
+    request_hash = Column(String(64), nullable=False)
+    ticket_id = Column(String, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+    ticket = relationship("Ticket")

@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Empty means same-origin only, which is all the bundled dashboard needs.
     cors_origins: str = ""
     max_request_bytes: int = 64 * 1024
+    # How long an Idempotency-Key on POST /tickets is remembered. After this a
+    # reused key creates a new ticket.
+    idempotency_key_ttl_seconds: int = 24 * 60 * 60
 
     database_url: str = "postgresql+psycopg://support_user:support_pass@postgres:5432/support_db"
 
