@@ -136,6 +136,19 @@ class Settings(BaseSettings):
     # Extra or corrected prices, USD per million tokens: {"model": [input, output]}
     llm_price_overrides: dict[str, tuple[float, float]] = {}
 
+    # Prometheus metrics: GET /metrics on the API and, in the Celery worker, a
+    # separate metrics server on worker_metrics_port. Access rules, in order:
+    # METRICS_TOKEN set -> "Authorization: Bearer <token>" required;
+    # METRICS_PUBLIC=true -> no credentials (private networks only);
+    # otherwise a read-scoped X-API-Key, exactly like GET /tickets.
+    metrics_enabled: bool = True
+    metrics_token: str = ""
+    metrics_public: bool = False
+    # 0 disables the worker's metrics server. Loopback by default; containers
+    # set 0.0.0.0 and rely on the port not being published.
+    worker_metrics_port: int = 9101
+    worker_metrics_addr: str = "127.0.0.1"
+
     @property
     def api_key_list(self) -> list[ApiKey]:
         return parse_api_keys(self.api_keys)

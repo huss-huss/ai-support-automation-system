@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from . import health as health_checks
 from . import idempotency
+from . import metrics as m
 from .audit import add_audit_log
 from .config import HealthStatus, get_settings
 from .db import (
@@ -26,12 +27,19 @@ from .db import (
 from .limits import BodySizeLimitMiddleware
 from .logging_config import configure_logging, request_id_var, ticket_id_var
 from .schemas import AuditLogRead, TicketCreate, TicketRead
-from .security import require_read_key, require_write_key, validate_api_keys
+from .security import (
+    check_metrics_access,
+    require_read_key,
+    require_write_key,
+    validate_api_keys,
+    validate_metrics_settings,
+)
 from .tasks import process_ticket
 
 settings = get_settings()
 configure_logging(settings.log_level, settings.log_format)
 validate_api_keys()
+validate_metrics_settings()
 logger = logging.getLogger(__name__)
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -77,13 +85,15 @@ async def request_context(request: Request, call_next):
         response.headers["X-Request-ID"] = request_id
         return response
     finally:
+        duration = time.perf_counter() - started
+        m.observe_http(request.method, m.route_label(request.scope), status_code, duration)
         logger.info(
             "request completed",
             extra={
                 "method": request.method,
                 "path": request.url.path,
                 "status_code": status_code,
-                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                "duration_ms": round(duration * 1000, 1),
             },
         )
         request_id_var.reset(token)
@@ -104,6 +114,16 @@ def ready() -> JSONResponse:
         status_code=200 if healthy else 503,
         content={"status": "ready" if healthy else "not_ready", "checks": checks},
     )
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(request: Request) -> Response:
+    """Prometheus metrics for this API process. See check_metrics_access for auth."""
+    if not settings.metrics_enabled:
+        raise HTTPException(status_code=404, detail="Not Found")
+    check_metrics_access(request.headers.get("x-api-key"), request.headers.get("authorization"))
+    body, content_type = m.render()
+    return Response(content=body, media_type=content_type)
 
 
 @app.post(
@@ -150,6 +170,7 @@ def ingest_ticket(
                 raise
             return _replay(winner, body_hash, response)
 
+    m.TICKETS_INGESTED.labels(result="created").inc()
     _enqueue(db, ticket)
     return TicketRead.model_validate(ticket)
 
@@ -192,12 +213,14 @@ def _create_ticket(
 def _replay(record: IdempotencyKey, body_hash: str, response: Response) -> TicketRead:
     """Return the ticket an earlier request created, or 422 if the body differs."""
     if record.request_hash != body_hash:
+        m.TICKETS_INGESTED.labels(result="conflict").inc()
         raise HTTPException(
             status_code=422,
             detail=f"{idempotency.HEADER} was already used with a different request body",
         )
     ticket_id_var.set(record.ticket_id)
     logger.info("Replaying ticket creation for idempotency key")
+    m.TICKETS_INGESTED.labels(result="replayed").inc()
     response.status_code = 200
     response.headers[idempotency.REPLAYED_HEADER] = "true"
     return TicketRead.model_validate(record.ticket)
@@ -214,6 +237,7 @@ def _enqueue(db: Session, ticket: Ticket) -> None:
         process_ticket.delay(ticket.id, request_id=request_id_var.get())
     except Exception as exc:  # noqa: BLE001 - any broker/transport failure
         logger.exception("Failed to enqueue ticket %s", ticket.id)
+        m.ENQUEUE_FAILURES.inc()
         add_audit_log(
             db,
             ticket_id=ticket.id,

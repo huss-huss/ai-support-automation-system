@@ -9,6 +9,11 @@ x-app-env: &app-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   API_KEYS: ${API_KEYS:?set API_KEYS (comma-separated) to protect the ticket endpoints}
   LOG_FORMAT: ${LOG_FORMAT:-json}
+  # /metrics: with METRICS_TOKEN set, scrapes need "Authorization: Bearer <token>"
+  # (what the monitoring profile's Prometheus sends); otherwise a read-scoped
+  # X-API-Key. METRICS_PUBLIC=true drops auth; only do that on a private network.
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
+  METRICS_PUBLIC: ${METRICS_PUBLIC:-false}
 
 services:
   api:
@@ -33,7 +38,19 @@ services:
     build: .
     container_name: support_worker
     command: celery -A app.celery_app worker --loglevel=info
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # Prefork pool children write metrics here; the main process merges them
+      # and serves them on WORKER_METRICS_PORT. tmpfs: private to this
+      # container and empty on every start, as multiprocess mode requires.
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus-metrics
+      WORKER_METRICS_ADDR: 0.0.0.0
+      WORKER_METRICS_PORT: "9101"
+    tmpfs:
+      - /tmp/prometheus-metrics
+    # Reachable from Prometheus on the compose network only; not published.
+    expose:
+      - "9101"
     depends_on:
       api:
         condition: service_healthy
@@ -65,6 +82,25 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Optional: METRICS_TOKEN=$(openssl rand -hex 32) docker compose --profile monitoring up
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: support_prometheus
+    profiles: ["monitoring"]
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    secrets:
+      - metrics_token
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - api
+      - worker
+
+secrets:
+  metrics_token:
+    environment: METRICS_TOKEN
 
 volumes:
   postgres_data:
