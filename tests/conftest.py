@@ -18,7 +18,9 @@ os.environ["OPENAI_API_KEY"] = ""
 os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["LLM_PROVIDER"] = "fake"
 os.environ["ENVIRONMENT"] = "test"
-os.environ["API_KEYS"] = "test-key,rotated-key"
+# Two keys in the original bare format (read-write) plus one key of each scope
+# in the name:key:scope format.
+os.environ["API_KEYS"] = "test-key,rotated-key,viewer:read-key:read,ops:named-write-key:write"
 os.environ["AUTH_DISABLED"] = "false"
 os.environ["CELERY_BROKER_URL"] = "memory://"
 os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
@@ -70,11 +72,13 @@ def db():
 
 
 TEST_API_KEY = "test-key"
+READ_ONLY_KEY = "read-key"
+NAMED_WRITE_KEY = "named-write-key"
 
 
 @pytest.fixture
 def api_client(fake_openai):
-    """TestClient that authenticates write requests by default."""
+    """TestClient that sends a read-write API key on every request by default."""
     from fastapi.testclient import TestClient
 
     from app.main import app

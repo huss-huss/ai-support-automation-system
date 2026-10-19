@@ -42,13 +42,6 @@ def test_reprocess_requires_api_key(client):
     assert resp.status_code == 401
 
 
-def test_reads_do_not_require_a_key(client):
-    ticket_id = _post(client).json()["id"]
-    no_key = {"X-API-Key": ""}
-    assert client.get("/tickets", headers=no_key).status_code == 200
-    assert client.get(f"/tickets/{ticket_id}", headers=no_key).status_code == 200
-
-
 def test_audit_records_key_fingerprint_not_the_key(client):
     ticket_id = _post(client).json()["id"]
     created = client.get(f"/tickets/{ticket_id}/audit").json()[0]
