@@ -10,6 +10,25 @@ Support queues mix outages, billing errors, legal threats and "how do I change m
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    C["Client / dashboard"] -->|"POST /tickets<br/>X-API-Key (read/write scope)<br/>Idempotency-Key"| API["FastAPI API (app/main.py)"]
+    API -->|"ticket + ticket_created event,<br/>one transaction"| PG[("PostgreSQL<br/>tickets, audit_logs, idempotency_keys")]
+    API -->|"enqueue ticket_id"| R["Redis broker"]
+    R --> W["Celery worker: process_ticket"]
+    W --> T["1. Triage agent<br/>strict JSON schema, TriageResult validation"]
+    T --> RT["2. Routing rules<br/>category to team, priority to SLA bucket"]
+    RT --> D["3. Drafting agent<br/>reply draft for human review"]
+    T --> LLM["LLMProvider<br/>OpenAI | Anthropic | fake"]
+    D --> LLM
+    T & RT & D -->|"step status + audit event<br/>(tokens, latency, cost_usd)"| PG
+    API --> M["Prometheus metrics<br/>/metrics (API), :9101 (worker)"]
+    W --> M
+    E["Eval harness (evals/run_eval.py)<br/>34 labeled tickets"] --> T
+```
+
+`POST /tickets` authenticates the API key and its scope, honours an optional `Idempotency-Key`, commits the ticket to Postgres and only then enqueues it on Redis. The Celery worker runs triage, routing and drafting as idempotent steps; each step writes its result, its status and an audit event (with provider, model, tokens and estimated cost for LLM calls) in one transaction. Both processes expose Prometheus metrics, and the eval harness scores the triage agent against a labeled dataset.
+
 ```
                  X-API-Key                         ┌──────────────────────────┐
   client ──POST /tickets──▶ FastAPI ──commit──────▶│ PostgreSQL               │
